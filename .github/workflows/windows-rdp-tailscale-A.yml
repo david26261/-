@@ -3,10 +3,20 @@ name: Windows RDP via Tailscale (A)
 on:
   workflow_dispatch:
     inputs:
+      test_mode:
+        description: "Test mode"
+        required: false
+        default: "false"
+
       runtime_minutes:
         description: "Runtime in minutes"
         required: false
         default: "355"
+
+      loops:
+        description: "Number of A+B cycles"
+        required: false
+        default: "2"
 
 concurrency:
   group: tailscale-rdp-singleton
@@ -88,11 +98,14 @@ jobs:
             -ErrorAction SilentlyContinue
 
           if ($existing) {
+
             Set-LocalUser `
               -Name $user `
               -Password $secure
+
           }
           else {
+
             New-LocalUser `
               -Name $user `
               -Password $secure `
@@ -175,13 +188,32 @@ jobs:
           Write-Host "RDP USER: $env:RDP_USER"
           Write-Host "TAILSCALE IP: $ip"
           Write-Host "HOSTNAME: $env:TS_HOSTNAME"
+          Write-Host "LOOPS: ${{ inputs.loops }}"
           Write-Host "=========================================="
 
-          Add-Content $env:GITHUB_STEP_SUMMARY "### Windows RDP via Tailscale (A)"
-          Add-Content $env:GITHUB_STEP_SUMMARY ""
-          Add-Content $env:GITHUB_STEP_SUMMARY "Tailscale IP: **$ip**"
-          Add-Content $env:GITHUB_STEP_SUMMARY "Hostname: **$env:TS_HOSTNAME**"
-          Add-Content $env:GITHUB_STEP_SUMMARY "RDP User: **$env:RDP_USER**"
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            "### Windows RDP via Tailscale (A)"
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            ""
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            "Tailscale IP: **$ip**"
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            "Hostname: **$env:TS_HOSTNAME**"
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            "RDP User: **$env:RDP_USER**"
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            "Loops remaining: **${{ inputs.loops }}**"
 
       - name: Keep RDP alive
         shell: powershell
@@ -201,7 +233,9 @@ jobs:
           $end = (Get-Date).AddMinutes($runtime)
 
           while ((Get-Date) -lt $end) {
+
             Write-Host "$(Get-Date) - RDP is alive"
+
             Start-Sleep -Seconds 30
           }
 
@@ -215,11 +249,25 @@ jobs:
         run: |
           $repo = "${{ github.repository }}"
 
+          $loops = [int]"${{ inputs.loops }}"
+
+          if ($loops -lt 1) {
+            Write-Host "No loops remaining. Stopping."
+            exit 0
+          }
+
+          Write-Host "Starting workflow B..."
+          Write-Host "Loops remaining: $loops"
+
           $body = @{
             ref = "main"
+
             inputs = @{
+              test_mode = "${{ inputs.test_mode }}"
               runtime_minutes = "${{ inputs.runtime_minutes }}"
+              loops = "$loops"
             }
+
           } | ConvertTo-Json -Depth 5
 
           Invoke-RestMethod `
@@ -233,4 +281,4 @@ jobs:
             -Body $body `
             -ContentType "application/json"
 
-          Write-Host "Workflow B dispatched successfully."
+          Write-Host "Workflow B dispatched successfully." successfully."
