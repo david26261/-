@@ -1,0 +1,218 @@
+name: Windows RDP via Tailscale (A)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ts_tailnet:
+        description: "Tailscale tailnet"
+        required: true
+
+      ts_api_key:
+        description: "Tailscale API key"
+        required: true
+
+      ts_authkey:
+        description: "Tailscale auth key"
+        required: true
+
+      gh_api_token:
+        description: "GitHub token with workflow dispatch permission"
+        required: true
+
+      runtime_minutes:
+        description: "Runtime in minutes"
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+
+env:
+  RDP_USER: Bullettemporary
+  RDP_PASS: ${{ secrets.RDP_PASS }}
+  TS_HOSTNAME: bullet
+
+jobs:
+  rdp:
+    runs-on: windows-2022
+    timeout-minutes: 15
+
+    steps:
+
+      - name: Validate inputs
+        shell: powershell
+        run: |
+          if ([string]::IsNullOrWhiteSpace("${{ inputs.ts_tailnet }}")) {
+            throw "Missing ts_tailnet"
+          }
+
+          if ([string]::IsNullOrWhiteSpace("${{ inputs.ts_api_key }}")) {
+            throw "Missing ts_api_key"
+          }
+
+          if ([string]::IsNullOrWhiteSpace("${{ inputs.ts_authkey }}")) {
+            throw "Missing ts_authkey"
+          }
+
+          if ([string]::IsNullOrWhiteSpace("${{ inputs.gh_api_token }}")) {
+            throw "Missing gh_api_token"
+          }
+
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.RDP_PASS }}")) {
+            throw "Missing RDP_PASS repository secret"
+          }
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
+          $installer = "$env:TEMP\tailscale-setup.exe"
+
+          Invoke-WebRequest -Uri $url -OutFile $installer
+
+          Start-Process `
+            -FilePath $installer `
+            -ArgumentList "/quiet" `
+            -Wait
+
+          Start-Sleep -Seconds 5
+
+          & "C:\Program Files\Tailscale\tailscale.exe" version
+
+      - name: Configure Windows RDP
+        shell: powershell
+        run: |
+          $user = "${{ env.RDP_USER }}"
+          $pass = "${{ env.RDP_PASS }}"
+
+          $secure = ConvertTo-SecureString `
+            $pass `
+            -AsPlainText `
+            -Force
+
+          $existing = Get-LocalUser `
+            -Name $user `
+            -ErrorAction SilentlyContinue
+
+          if ($existing) {
+            Set-LocalUser `
+              -Name $user `
+              -Password $secure
+          }
+          else {
+            New-LocalUser `
+              -Name $user `
+              -Password $secure `
+              -PasswordNeverExpires `
+              -UserMayNotChangePassword
+          }
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $user `
+            -ErrorAction SilentlyContinue
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $user `
+            -ErrorAction SilentlyContinue
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop"
+
+          Restart-Service TermService -Force
+
+      - name: Connect Tailscale
+        shell: powershell
+        run: |
+          $authkey = "${{ inputs.ts_authkey }}"
+
+          & "C:\Program Files\Tailscale\tailscale.exe" up `
+            --authkey="$authkey" `
+            --hostname="${{ env.TS_HOSTNAME }}" `
+            --accept-routes `
+            --accept-dns=false
+
+          Start-Sleep -Seconds 8
+
+          Write-Host ""
+          Write-Host "===== TAILSCALE STATUS ====="
+          & "C:\Program Files\Tailscale\tailscale.exe" status
+
+          Write-Host ""
+          Write-Host "===== TAILSCALE IPv4 ====="
+          $ip = (
+            & "C:\Program Files\Tailscale\tailscale.exe" ip -4 |
+            Select-Object -First 1
+          ).Trim()
+
+          Write-Host $ip
+
+          Write-Host ""
+          Write-Host "===== RDP INFORMATION ====="
+          Write-Host "RDP User: ${{ env.RDP_USER }}"
+          Write-Host "Tailscale IP: $ip"
+          Write-Host "Hostname: ${{ env.TS_HOSTNAME }}"
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            "### Windows RDP via Tailscale (A)"
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            ""
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            "Tailscale IP: **$ip**"
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            "Hostname: **${{ env.TS_HOSTNAME }}**"
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            "RDP User: **${{ env.RDP_USER }}**"
+
+      - name: Test RDP availability
+        shell: powershell
+        run: |
+          Write-Host "Testing local RDP port 3389..."
+
+          $result = Test-NetConnection `
+            -ComputerName 127.0.0.1 `
+            -Port 3389
+
+          if (-not $result.TcpTestSucceeded) {
+            throw "RDP port 3389 is not available."
+          }
+
+          Write-Host "RDP port 3389 is OPEN."
+
+      - name: Keep RDP alive
+        shell: powershell
+        run: |
+          $runtime = [int]"${{ inputs.runtime_minutes }}"
+
+          if ($runtime -lt 1) {
+            $runtime = 5
+          }
+
+          Write-Host "Keeping RDP alive for $runtime minutes..."
+
+          $end = (Get-Date).AddMinutes($runtime)
+
+          while ((Get-Date) -lt $end) {
+            Write-Host "$(Get-Date) - RDP is alive"
+            Start-Sleep -Seconds 30
+          }
+
+      - name: Finish
+        shell: powershell
+        run: |
+          Write-Host "Test completed successfully."
