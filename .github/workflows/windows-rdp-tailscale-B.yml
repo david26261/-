@@ -7,10 +7,11 @@ on:
         description: "Test mode"
         required: false
         default: "false"
+
       runtime_minutes:
         description: "Runtime in minutes"
         required: false
-        default: "355"
+        default: "350"
 
 concurrency:
   group: tailscale-rdp-singleton
@@ -35,16 +36,11 @@ jobs:
         shell: powershell
         env:
           RDP_PASS: ${{ secrets.RDP_PASS }}
-          TS_API_KEY: ${{ secrets.TS_API_KEY }}
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
           GH_API_TOKEN: ${{ secrets.GH_API_TOKEN }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:RDP_PASS)) {
             throw "Missing RDP_PASS secret"
-          }
-
-          if ([string]::IsNullOrWhiteSpace($env:TS_API_KEY)) {
-            throw "Missing TS_API_KEY secret"
           }
 
           if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
@@ -207,11 +203,11 @@ jobs:
           $runtime = [int]"${{ inputs.runtime_minutes }}"
 
           if ($runtime -lt 1) {
-            $runtime = 355
+            $runtime = 350
           }
 
-          if ($runtime -gt 355) {
-            $runtime = 355
+          if ($runtime -gt 350) {
+            $runtime = 350
           }
 
           Write-Host "Keeping RDP alive for $runtime minutes..."
