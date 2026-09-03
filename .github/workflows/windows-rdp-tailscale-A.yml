@@ -7,10 +7,11 @@ on:
         description: "Test mode"
         required: false
         default: "false"
+
       runtime_minutes:
         description: "Runtime in minutes"
         required: false
-        default: "355"
+        default: "350"
 
 concurrency:
   group: tailscale-rdp-singleton
@@ -35,16 +36,11 @@ jobs:
         shell: powershell
         env:
           RDP_PASS: ${{ secrets.RDP_PASS }}
-          TS_API_KEY: ${{ secrets.TS_API_KEY }}
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
           GH_API_TOKEN: ${{ secrets.GH_API_TOKEN }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:RDP_PASS)) {
             throw "Missing RDP_PASS secret"
-          }
-
-          if ([string]::IsNullOrWhiteSpace($env:TS_API_KEY)) {
-            throw "Missing TS_API_KEY secret"
           }
 
           if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
@@ -195,4 +191,61 @@ jobs:
 
           Add-Content `
             $env:GITHUB_STEP_SUMMARY `
-            "Hostname: **$env:TS
+            "Hostname: **$env:TS_HOSTNAME**"
+
+          Add-Content `
+            $env:GITHUB_STEP_SUMMARY `
+            "RDP User: **$env:RDP_USER**"
+
+      - name: Keep RDP alive
+        shell: powershell
+        run: |
+          $runtime = [int]"${{ inputs.runtime_minutes }}"
+
+          if ($runtime -lt 1) {
+            $runtime = 350
+          }
+
+          if ($runtime -gt 350) {
+            $runtime = 350
+          }
+
+          Write-Host "Keeping RDP alive for $runtime minutes..."
+
+          $end = (Get-Date).AddMinutes($runtime)
+
+          while ((Get-Date) -lt $end) {
+            Write-Host "$(Get-Date) - RDP is alive"
+            Start-Sleep -Seconds 30
+          }
+
+          Write-Host "Runtime finished."
+
+      - name: Start workflow B
+        if: success()
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GH_API_TOKEN }}
+        run: |
+          $repo = "${{ github.repository }}"
+
+          $body = @{
+            ref = "main"
+            inputs = @{
+              test_mode = "${{ inputs.test_mode }}"
+              runtime_minutes = "${{ inputs.runtime_minutes }}"
+            }
+          } | ConvertTo-Json -Depth 5
+
+          Invoke-RestMethod `
+            -Method POST `
+            -Uri "https://api.github.com/repos/$repo/actions/workflows/windows-rdp-tailscale-B.yml/dispatches" `
+            -Headers @{
+              Authorization = "Bearer $env:GH_TOKEN"
+              Accept = "application/vnd.github+json"
+              "X-GitHub-Api-Version" = "2022-11-28"
+            } `
+            -Body $body `
+            -ContentType "application/json"
+
+          Write-Host "Workflow B dispatched successfully."
