@@ -1,4 +1,4 @@
-name: Windows RDP via Tailscale (A)
+name: Windows RDP via Tailscale (B)
 
 on:
   workflow_dispatch:
@@ -135,7 +135,7 @@ jobs:
         run: |
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
           $ip = (& $ts ip -4 | Select-Object -First 1).Trim()
-          Add-Content $env:GITHUB_STEP_SUMMARY "### Windows RDP via Tailscale (A)"
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Windows RDP via Tailscale (B)"
           Add-Content $env:GITHUB_STEP_SUMMARY "Tailscale IP: **$ip**"
           Add-Content $env:GITHUB_STEP_SUMMARY "Hostname: **$env:TS_HOSTNAME**"
           Add-Content $env:GITHUB_STEP_SUMMARY "RDP User: **$env:RDP_USER**"
@@ -249,7 +249,7 @@ jobs:
               $Resp = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
               $GoFileLink = ($Resp | ConvertFrom-Json).data.downloadPage
               
-              $Msg = "✅ [Workflow A] Backup Complete ($SizeMB MB)`nGoFile Link: $GoFileLink"
+              $Msg = "✅ [Workflow B] Backup Complete ($SizeMB MB)`nGoFile Link: $GoFileLink"
               Write-Host $Msg
               Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
               
@@ -268,7 +268,7 @@ jobs:
           path: C:\backup_output.zip
           retention-days: 1
 
-      - name: Start workflow B
+      - name: Start workflow A or stop
         if: always()
         shell: powershell
         env:
@@ -276,14 +276,15 @@ jobs:
         run: |
           $repo = "${{ github.repository }}"
           $loops = [int]"${{ inputs.loops }}"
-          if ($loops -lt 1) { exit 0 }
+          if ($loops -le 1) { exit 0 }
+          $nextLoops = $loops - 1
           
           $body = @{
             ref = "main"
             inputs = @{
               test_mode = "${{ inputs.test_mode }}"
               runtime_minutes = "${{ inputs.runtime_minutes }}"
-              loops = "$loops"
+              loops = "$nextLoops"
               enable_backup = "${{ inputs.enable_backup }}"
               prev_run_id = "${{ github.run_id }}"
             }
@@ -291,7 +292,7 @@ jobs:
 
           Invoke-RestMethod `
             -Method POST `
-            -Uri "https://api.github.com/repos/$repo/actions/workflows/windows-rdp-tailscale-B.yml/dispatches" `
+            -Uri "https://api.github.com/repos/$repo/actions/workflows/windows-rdp-tailscale-A.yml/dispatches" `
             -Headers @{
               Authorization = "Bearer $env:GH_TOKEN"
               Accept = "application/vnd.github+json"
