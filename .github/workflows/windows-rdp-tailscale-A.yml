@@ -145,35 +145,6 @@ jobs:
             Write-Host "Logon restore task registered for $env:RDP_USER"
           } catch { Write-Host "WARNING: could not register logon restore task: $_" }
 
-      - name: Connect Tailscale
-        shell: powershell
-        env:
-          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
-        run: |
-          $ts = "C:\Program Files\Tailscale\tailscale.exe"
-          & $ts up --authkey="$env:TS_AUTHKEY" --hostname="$env:TS_HOSTNAME" --accept-routes --accept-dns=false
-          Start-Sleep -Seconds 8
-          & $ts status
-          & $ts ip -4
-
-      - name: Test RDP availability
-        shell: powershell
-        run: |
-          $result = Test-NetConnection -ComputerName "127.0.0.1" -Port 3389
-          if (-not $result.TcpTestSucceeded) { throw "RDP port 3389 is NOT open." }
-
-      - name: Show RDP information
-        shell: powershell
-        run: |
-          $ts = "C:\Program Files\Tailscale\tailscale.exe"
-          $ip = (& $ts ip -4 | Select-Object -First 1).Trim()
-          Add-Content $env:GITHUB_STEP_SUMMARY "### Windows RDP via Tailscale (A)"
-          Add-Content $env:GITHUB_STEP_SUMMARY "Tailscale IP: **$ip**"
-          Add-Content $env:GITHUB_STEP_SUMMARY "Hostname: **$env:TS_HOSTNAME**"
-          Add-Content $env:GITHUB_STEP_SUMMARY "RDP User: **$env:RDP_USER**"
-          Add-Content $env:GITHUB_STEP_SUMMARY "Loops remaining: **${{ inputs.loops }}**"
-          Add-Content $env:GITHUB_STEP_SUMMARY "Auto Backup Enabled: **${{ inputs.enable_backup }}**"
-
       - name: Install WinRAR
         shell: powershell
         continue-on-error: true
@@ -223,25 +194,26 @@ jobs:
               }
             }
           }
-          Write-Host "Installing Telegram Desktop (official download)..."
-          $tgSetup = "$env:TEMP\telegram-setup.exe"
-          curl.exe -L -s "https://telegram.org/dl/desktop/win64" -o "$tgSetup"
-          if ((Test-Path $tgSetup) -and ((Get-Item $tgSetup).Length -gt 10MB)) {
-            Start-Process -FilePath $tgSetup -ArgumentList "/VERYSILENT /NORESTART /ALLUSERS" -Wait
+          Write-Host "Downloading Telegram portable (official zip - no installer)..."
+          $tgZip = "$env:TEMP\telegram-portable.zip"
+          curl.exe -L -s "https://telegram.org/dl/desktop/win64_portable" -o "$tgZip"
+          if ((Test-Path $tgZip) -and ((Get-Item $tgZip).Length -gt 20MB)) {
+            New-Item -ItemType Directory -Force -Path "C:\Apps" | Out-Null
+            & "C:\Program Files\7-Zip\7z.exe" x "$tgZip" -o"C:\Apps" -y
           } else {
-            Write-Host "WARNING: Telegram download failed or file too small"
+            Write-Host "WARNING: Telegram portable download failed or file too small"
           }
-          if (Test-Path "C:\Program Files\Telegram Desktop\Telegram.exe") {
-            New-DeskShortcut "C:\Program Files\Telegram Desktop\Telegram.exe" "Telegram Desktop"
-            Write-Host "Telegram OK"
+          if (Test-Path "C:\Apps\Telegram\Telegram.exe") {
+            New-DeskShortcut "C:\Apps\Telegram\Telegram.exe" "Telegram Desktop"
+            Write-Host "Telegram OK (portable at C:\Apps\Telegram)"
           } else {
-            Write-Host "WARNING: Telegram.exe not found after install"
+            Write-Host "WARNING: Telegram.exe not found after extraction"
           }
 
       - name: Install TeraBox Desktop
         shell: powershell
         continue-on-error: true
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: |
           function New-DeskShortcut($exe, $name) {
             foreach ($desk in @("C:\Users\Public\Desktop", "C:\Users\$env:RDP_USER\Desktop")) {
@@ -254,25 +226,44 @@ jobs:
               }
             }
           }
-          Write-Host "Installing TeraBox via winget..."
-          winget install --id Flextech.TeraBox -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-          $tbExe = @(
-            "C:\Program Files\TeraBox\TeraBox.exe",
-            "C:\Program Files (x86)\TeraBox\TeraBox.exe",
-            "$env:APPDATA\TeraBox\TeraBox.exe",
-            "C:\Users\runneradmin\AppData\Roaming\TeraBox\TeraBox.exe",
-            "$env:LOCALAPPDATA\TeraBox\TeraBox.exe"
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if ($tbExe -and $tbExe -like "*AppData*") {
-            Write-Host "TeraBox installed per-user at $tbExe - copying program folder to Program Files so the RDP user can run it"
-            Copy-Item (Split-Path $tbExe) "C:\Program Files\TeraBox" -Recurse -Force -ErrorAction SilentlyContinue
-            if (Test-Path "C:\Program Files\TeraBox\TeraBox.exe") { $tbExe = "C:\Program Files\TeraBox\TeraBox.exe" }
+          Write-Host "winget does not exist on this runner - installing winget itself first..."
+          $wg = $null
+          curl.exe -L -s "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx" -o "$env:TEMP\vclibs.appx"
+          Add-AppxPackage "$env:TEMP\vclibs.appx" -ErrorAction SilentlyContinue
+          curl.exe -L -s "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx" -o "$env:TEMP\uixaml.appx"
+          Add-AppxPackage "$env:TEMP\uixaml.appx" -ErrorAction SilentlyContinue
+          foreach ($v in @("v1.9.25200", "v1.8.1911", "v1.7.11261")) {
+            curl.exe -L -s "https://github.com/microsoft/winget-cli/releases/download/$v/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -o "$env:TEMP\winget.msixbundle"
+            try {
+              Add-AppxPackage "$env:TEMP\winget.msixbundle" -ErrorAction Stop
+              Write-Host "winget installed ($v)"
+              break
+            } catch { Write-Host "winget version $v failed, trying next" }
           }
-          if ($tbExe) {
-            New-DeskShortcut $tbExe "TeraBox"
-            Write-Host "TeraBox OK - $tbExe"
+          $wg = Get-ChildItem "C:\Program Files\WindowsApps" -Recurse -Filter winget.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if ($wg) {
+            Write-Host "Installing TeraBox with winget at $wg"
+            & $wg install --id Flextech.TeraBox -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+            $tbExe = @(
+              "C:\Program Files\TeraBox\TeraBox.exe",
+              "C:\Program Files (x86)\TeraBox\TeraBox.exe",
+              "$env:APPDATA\TeraBox\TeraBox.exe",
+              "C:\Users\runneradmin\AppData\Roaming\TeraBox\TeraBox.exe",
+              "$env:LOCALAPPDATA\TeraBox\TeraBox.exe"
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($tbExe -and $tbExe -like "*AppData*") {
+              Write-Host "TeraBox installed per-user at $tbExe - copying program folder to Program Files"
+              Copy-Item (Split-Path $tbExe) "C:\Program Files\TeraBox" -Recurse -Force -ErrorAction SilentlyContinue
+              if (Test-Path "C:\Program Files\TeraBox\TeraBox.exe") { $tbExe = "C:\Program Files\TeraBox\TeraBox.exe" }
+            }
+            if ($tbExe) {
+              New-DeskShortcut $tbExe "TeraBox"
+              Write-Host "TeraBox OK - $tbExe"
+            } else {
+              Write-Host "WARNING: TeraBox.exe not found anywhere after winget install"
+            }
           } else {
-            Write-Host "WARNING: TeraBox.exe not found anywhere after winget install"
+            Write-Host "WARNING: winget bootstrap failed - TeraBox skipped this run"
           }
 
       - name: Verify Desktop shortcuts
@@ -283,8 +274,37 @@ jobs:
           Get-ChildItem "C:\Users\Public\Desktop" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
           Write-Host "=== Installed check ==="
           Write-Host ("WinRAR:   " + (Test-Path "C:\Program Files\WinRAR\WinRAR.exe"))
-          Write-Host ("Telegram: " + (Test-Path "C:\Program Files\Telegram Desktop\Telegram.exe"))
+          Write-Host ("Telegram: " + (Test-Path "C:\Apps\Telegram\Telegram.exe"))
           Write-Host ("TeraBox:  " + (Test-Path "C:\Program Files\TeraBox\TeraBox.exe"))
+
+      - name: Connect Tailscale
+        shell: powershell
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          $ts = "C:\Program Files\Tailscale\tailscale.exe"
+          & $ts up --authkey="$env:TS_AUTHKEY" --hostname="$env:TS_HOSTNAME" --accept-routes --accept-dns=false
+          Start-Sleep -Seconds 8
+          & $ts status
+          & $ts ip -4
+
+      - name: Test RDP availability
+        shell: powershell
+        run: |
+          $result = Test-NetConnection -ComputerName "127.0.0.1" -Port 3389
+          if (-not $result.TcpTestSucceeded) { throw "RDP port 3389 is NOT open." }
+
+      - name: Show RDP information
+        shell: powershell
+        run: |
+          $ts = "C:\Program Files\Tailscale\tailscale.exe"
+          $ip = (& $ts ip -4 | Select-Object -First 1).Trim()
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Windows RDP via Tailscale (A)"
+          Add-Content $env:GITHUB_STEP_SUMMARY "Tailscale IP: **$ip**"
+          Add-Content $env:GITHUB_STEP_SUMMARY "Hostname: **$env:TS_HOSTNAME**"
+          Add-Content $env:GITHUB_STEP_SUMMARY "RDP User: **$env:RDP_USER**"
+          Add-Content $env:GITHUB_STEP_SUMMARY "Loops remaining: **${{ inputs.loops }}**"
+          Add-Content $env:GITHUB_STEP_SUMMARY "Auto Backup Enabled: **${{ inputs.enable_backup }}**"
 
       - name: Keep RDP alive
         shell: powershell
