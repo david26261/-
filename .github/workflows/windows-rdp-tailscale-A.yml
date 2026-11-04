@@ -107,11 +107,43 @@ jobs:
       - name: Extract Restored Files to User Profile
         if: ${{ inputs.enable_backup == 'true' && inputs.prev_run_id != '' }}
         shell: powershell
+        continue-on-error: true
         run: |
-          if (Test-Path "C:\RestoredBackup\backup_output.zip") {
-            & "C:\Program Files\7-Zip\7z.exe" x "C:\RestoredBackup\backup_output.zip" -o"C:\Users" -y
-            Write-Host "Files restored successfully to C:\Users!"
+          $zip = "C:\RestoredBackup\backup_output.zip"
+          if (-not (Test-Path $zip)) { Write-Host "No backup zip was downloaded - nothing to restore"; exit 0 }
+          Write-Host "Backup zip size: $((Get-Item $zip).Length) bytes"
+          New-Item -ItemType Directory -Force -Path "C:\RestoredBackup\extracted" | Out-Null
+          & "C:\Program Files\7-Zip\7z.exe" x "$zip" -o"C:\RestoredBackup\extracted" -y
+          Write-Host "=== Files inside the backup ==="
+          Get-ChildItem "C:\RestoredBackup\extracted" -Recurse -File | ForEach-Object { Write-Host "$($_.FullName) - $($_.Length) bytes" }
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Restored files"
+          Get-ChildItem "C:\RestoredBackup\extracted" -Recurse -File | ForEach-Object { Add-Content $env:GITHUB_STEP_SUMMARY "- $($_.FullName.Replace('C:\RestoredBackup\extracted\','')) - $($_.Length) bytes" }
+          # Immediate copy into the expected profile folder
+          $srcProfile = Get-ChildItem "C:\RestoredBackup\extracted" -Directory | Select-Object -First 1
+          if ($srcProfile) {
+            Copy-Item "$($srcProfile.FullName)" "C:\Users\" -Recurse -Force -ErrorAction SilentlyContinue
           }
+          # Guarantee: a logon task copies the files into the REAL profile of the RDP user
+          # (Windows may create the profile as Bullettemporary.<name> on first logon)
+          $restoreScript = @'
+          $src = Get-ChildItem "C:\RestoredBackup\extracted" -Directory | Select-Object -First 1
+          if ($src) {
+            foreach ($f in @("Desktop", "Downloads", "Documents")) {
+              if (Test-Path "$($src.FullName)\$f") {
+                New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\$f" | Out-Null
+                Copy-Item "$($src.FullName)\$f\*" "$env:USERPROFILE\$f\" -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          }
+          '@
+          Set-Content "C:\RestoredBackup\apply-restore.ps1" $restoreScript
+          try {
+            $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File C:\RestoredBackup\apply-restore.ps1"
+            $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:RDP_USER
+            $principal = New-ScheduledTaskPrincipal -UserId $env:RDP_USER -RunLevel Highest
+            Register-ScheduledTask -TaskName "ApplyRestoredFiles" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+            Write-Host "Logon restore task registered for $env:RDP_USER"
+          } catch { Write-Host "WARNING: could not register logon restore task: $_" }
 
       - name: Connect Tailscale
         shell: powershell
@@ -145,39 +177,63 @@ jobs:
       - name: Install WinRAR
         shell: powershell
         continue-on-error: true
-        timeout-minutes: 4
+        timeout-minutes: 5
         run: |
-          Write-Host "Installing WinRAR via winget..."
-          winget install --id RARLab.WinRAR -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          function New-DeskShortcut($exe, $name) {
+            foreach ($desk in @("C:\Users\Public\Desktop", "C:\Users\$env:RDP_USER\Desktop")) {
+              if (Test-Path $desk) {
+                $s = New-Object -ComObject WScript.Shell
+                $lnk = $s.CreateShortcut("$desk\$name.lnk")
+                $lnk.TargetPath = $exe
+                $lnk.Save()
+                Write-Host "Shortcut created: $desk\$name.lnk"
+              }
+            }
+          }
+          Write-Host "Installing WinRAR (direct download, silent)..."
+          $wr = "$env:TEMP\winrar-setup.exe"
+          curl.exe -L -s "https://www.win-rar.com/fileadmin/winrar-versions/winrar-x64-723.exe" -o "$wr"
+          if ((Test-Path $wr) -and ((Get-Item $wr).Length -gt 2MB)) {
+            Start-Process -FilePath $wr -ArgumentList "/S" -Wait
+          }
+          if (-not (Test-Path "C:\Program Files\WinRAR\WinRAR.exe")) {
+            Write-Host "Direct install did not produce WinRAR.exe - trying winget..."
+            winget install --id RARLab.WinRAR -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          }
           if (Test-Path "C:\Program Files\WinRAR\WinRAR.exe") {
-            $s = New-Object -ComObject WScript.Shell
-            $lnk = $s.CreateShortcut("C:\Users\Public\Desktop\WinRAR.lnk")
-            $lnk.TargetPath = "C:\Program Files\WinRAR\WinRAR.exe"
-            $lnk.Save()
-            Write-Host "WinRAR OK - shortcut created on Public Desktop"
+            New-DeskShortcut "C:\Program Files\WinRAR\WinRAR.exe" "WinRAR"
+            Write-Host "WinRAR OK"
           } else {
-            Write-Host "WARNING: WinRAR.exe not found after install"
+            Write-Host "WARNING: WinRAR.exe still not found"
           }
 
       - name: Install Telegram Desktop
         shell: powershell
         continue-on-error: true
-        timeout-minutes: 4
+        timeout-minutes: 5
         run: |
-          Write-Host "Installing Telegram Desktop..."
+          function New-DeskShortcut($exe, $name) {
+            foreach ($desk in @("C:\Users\Public\Desktop", "C:\Users\$env:RDP_USER\Desktop")) {
+              if (Test-Path $desk) {
+                $s = New-Object -ComObject WScript.Shell
+                $lnk = $s.CreateShortcut("$desk\$name.lnk")
+                $lnk.TargetPath = $exe
+                $lnk.Save()
+                Write-Host "Shortcut created: $desk\$name.lnk"
+              }
+            }
+          }
+          Write-Host "Installing Telegram Desktop (official download)..."
           $tgSetup = "$env:TEMP\telegram-setup.exe"
           curl.exe -L -s "https://telegram.org/dl/desktop/win64" -o "$tgSetup"
           if ((Test-Path $tgSetup) -and ((Get-Item $tgSetup).Length -gt 10MB)) {
             Start-Process -FilePath $tgSetup -ArgumentList "/VERYSILENT /NORESTART /ALLUSERS" -Wait
           } else {
-            Write-Host "WARNING: Telegram download failed or too small, skipping install"
+            Write-Host "WARNING: Telegram download failed or file too small"
           }
           if (Test-Path "C:\Program Files\Telegram Desktop\Telegram.exe") {
-            $s = New-Object -ComObject WScript.Shell
-            $lnk = $s.CreateShortcut("C:\Users\Public\Desktop\Telegram Desktop.lnk")
-            $lnk.TargetPath = "C:\Program Files\Telegram Desktop\Telegram.exe"
-            $lnk.Save()
-            Write-Host "Telegram OK - shortcut created on Public Desktop"
+            New-DeskShortcut "C:\Program Files\Telegram Desktop\Telegram.exe" "Telegram Desktop"
+            Write-Host "Telegram OK"
           } else {
             Write-Host "WARNING: Telegram.exe not found after install"
           }
@@ -185,24 +241,38 @@ jobs:
       - name: Install TeraBox Desktop
         shell: powershell
         continue-on-error: true
-        timeout-minutes: 4
+        timeout-minutes: 5
         run: |
+          function New-DeskShortcut($exe, $name) {
+            foreach ($desk in @("C:\Users\Public\Desktop", "C:\Users\$env:RDP_USER\Desktop")) {
+              if (Test-Path $desk) {
+                $s = New-Object -ComObject WScript.Shell
+                $lnk = $s.CreateShortcut("$desk\$name.lnk")
+                $lnk.TargetPath = $exe
+                $lnk.Save()
+                Write-Host "Shortcut created: $desk\$name.lnk"
+              }
+            }
+          }
           Write-Host "Installing TeraBox via winget..."
           winget install --id Flextech.TeraBox -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-          $tb = @(
+          $tbExe = @(
             "C:\Program Files\TeraBox\TeraBox.exe",
             "C:\Program Files (x86)\TeraBox\TeraBox.exe",
             "$env:APPDATA\TeraBox\TeraBox.exe",
+            "C:\Users\runneradmin\AppData\Roaming\TeraBox\TeraBox.exe",
             "$env:LOCALAPPDATA\TeraBox\TeraBox.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if ($tb) {
-            $s = New-Object -ComObject WScript.Shell
-            $lnk = $s.CreateShortcut("C:\Users\Public\Desktop\TeraBox.lnk")
-            $lnk.TargetPath = $tb
-            $lnk.Save()
-            Write-Host "TeraBox OK - shortcut created pointing to $tb"
+          if ($tbExe -and $tbExe -like "*AppData*") {
+            Write-Host "TeraBox installed per-user at $tbExe - copying program folder to Program Files so the RDP user can run it"
+            Copy-Item (Split-Path $tbExe) "C:\Program Files\TeraBox" -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path "C:\Program Files\TeraBox\TeraBox.exe") { $tbExe = "C:\Program Files\TeraBox\TeraBox.exe" }
+          }
+          if ($tbExe) {
+            New-DeskShortcut $tbExe "TeraBox"
+            Write-Host "TeraBox OK - $tbExe"
           } else {
-            Write-Host "WARNING: TeraBox.exe not found (per-user install) - install it once from inside the RDP session"
+            Write-Host "WARNING: TeraBox.exe not found anywhere after winget install"
           }
 
       - name: Verify Desktop shortcuts
@@ -211,6 +281,10 @@ jobs:
         run: |
           Write-Host "=== Public Desktop contents ==="
           Get-ChildItem "C:\Users\Public\Desktop" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+          Write-Host "=== Installed check ==="
+          Write-Host ("WinRAR:   " + (Test-Path "C:\Program Files\WinRAR\WinRAR.exe"))
+          Write-Host ("Telegram: " + (Test-Path "C:\Program Files\Telegram Desktop\Telegram.exe"))
+          Write-Host ("TeraBox:  " + (Test-Path "C:\Program Files\TeraBox\TeraBox.exe"))
 
       - name: Keep RDP alive
         shell: powershell
@@ -229,34 +303,40 @@ jobs:
         shell: powershell
         run: |
           $ArchivePath = "C:\backup_output.zip"
-          
           $UserFolders = Get-ChildItem -Path "C:\Users" -Directory | Where-Object { $_.Name -like "Bullettemporary*" }
           $PathsToBackup = @()
           foreach ($u in $UserFolders) {
-            if (Test-Path "$($u.FullName)\Downloads") { $PathsToBackup += "$($u.FullName)\Downloads" }
-            if (Test-Path "$($u.FullName)\Desktop")   { $PathsToBackup += "$($u.FullName)\Desktop" }
+            foreach ($f in @("Downloads", "Desktop", "Documents")) {
+              if (Test-Path "$($u.FullName)\$f") { $PathsToBackup += "$($u.FullName)\$f" }
+            }
           }
-
+          Write-Host "=== Files that will be backed up ==="
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Files backed up"
+          foreach ($p in $PathsToBackup) {
+            Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "$($_.FullName) - $($_.Length) bytes"
+              Add-Content $env:GITHUB_STEP_SUMMARY "- $($_.FullName) - $($_.Length) bytes"
+            }
+          }
           if ($PathsToBackup.Count -gt 0) {
-            Write-Host "Backing up folders: $($PathsToBackup -join ', ')"
             Set-Location "C:\Users"
             $RelativePaths = $PathsToBackup | ForEach-Object { $_.Replace("C:\Users\", "") }
             & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 -ssw "$ArchivePath" $RelativePaths
-            
             if (Test-Path $ArchivePath) {
               $SizeMB = [math]::Round((Get-Item $ArchivePath).Length / 1MB, 2)
+              Write-Host "Backup created: $SizeMB MB"
               $Server = (Invoke-RestMethod -Uri "https://api.gofile.io/servers").data.servers[0].name
               $Resp = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
               $GoFileLink = ($Resp | ConvertFrom-Json).data.downloadPage
-              
-              $Msg = "✅ [Workflow A] Backup Complete ($SizeMB MB)`nGoFile Link: $GoFileLink"
+              $Msg = "Backup Complete ($SizeMB MB) - GoFile Link: $GoFileLink"
               Write-Host $Msg
               Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
-              
               if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
                 Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body $Msg
               }
             }
+          } else {
+            Write-Host "WARNING: no user folders found to back up"
           }
 
       - name: Upload Artifact for Next Session Transfer
