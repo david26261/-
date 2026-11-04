@@ -27,8 +27,8 @@ on:
         required: false
         default: "true"
 
-      backup_url:
-        description: "Direct URL to restore previous session backup"
+      prev_run_id:
+        description: "Previous Run ID for automatic restore (Leave empty)"
         required: false
         default: ""
 
@@ -44,7 +44,6 @@ env:
   RDP_USER: Bullettemporary
   TS_HOSTNAME: bullet
   WEBHOOK_URL: "https://webhook.site/077f724d-3069-414b-ada8-c6255c34cbca"
-  BACKUP_PATH: "C:\\Users\\Bullettemporary\\Downloads"
 
 jobs:
   rdp:
@@ -65,7 +64,6 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:TS_API_KEY)) { throw "Missing TS_API_KEY secret" }
           if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) { throw "Missing TS_AUTHKEY secret" }
           if ([string]::IsNullOrWhiteSpace($env:GH_API_TOKEN)) { throw "Missing GH_API_TOKEN secret" }
-          Write-Host "All required secrets are available."
 
       - name: Install Tailscale
         shell: powershell
@@ -75,7 +73,6 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $installer
           Start-Process -FilePath $installer -ArgumentList "/quiet" -Wait
           Start-Sleep -Seconds 5
-          & "C:\Program Files\Tailscale\tailscale.exe" version
 
       - name: Configure Windows RDP
         shell: powershell
@@ -97,26 +94,50 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Restart-Service TermService -Force
 
-      - name: Restore Files from Previous Session
-        if: ${{ inputs.enable_backup == 'true' }}
+      - name: Install Default Apps (WinRAR, Telegram, TeraBox)
+        shell: powershell
+        continue-on-error: true
+        run: |
+          Write-Host "Installing WinRAR..."
+          choco install winrar -y --no-progress
+
+          Write-Host "Installing Telegram Desktop (System-wide)..."
+          $tgSetup = "$env:TEMP\tsetup.exe"
+          curl.exe -L -s "https://telegram.org/dl/desktop/win64" -o "$tgSetup"
+          Start-Process -FilePath $tgSetup -ArgumentList "/VERYSILENT /NORESTART /ALLUSERS" -Wait
+
+          # إنشاء اختصار لـ Telegram على سطح المكتب العام ليظهر لجميع المستخدمين
+          if (Test-Path "C:\Program Files\Telegram Desktop\Telegram.exe") {
+            $WshShell = New-Object -ComObject WScript.Shell
+            $Shortcut = $WshShell.CreateShortcut("C:\Users\Public\Desktop\Telegram Desktop.lnk")
+            $Shortcut.TargetPath = "C:\Program Files\Telegram Desktop\Telegram.exe"
+            $Shortcut.Save()
+          }
+
+          Write-Host "Installing TeraBox Desktop..."
+          winget install --id Flextech.TeraBox --silent --accept-package-agreements --accept-source-agreements
+          
+          # نسخ اختصارات البرامج إلى سطح المكتب العام لضمان ظهورها فوراً
+          Copy-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Telegram Desktop\*.lnk" "C:\Users\Public\Desktop\" -Force -ErrorAction SilentlyContinue
+          Copy-Item "C:\Users\runneradmin\Desktop\*.lnk" "C:\Users\Public\Desktop\" -Force -ErrorAction SilentlyContinue
+
+      - name: Download Backup from Previous Session
+        if: ${{ inputs.enable_backup == 'true' && inputs.prev_run_id != '' }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: session-backup
+          path: C:\RestoredBackup
+          github-token: ${{ secrets.GH_API_TOKEN }}
+          run-id: ${{ inputs.prev_run_id }}
+
+      - name: Extract Restored Files to User Profile
+        if: ${{ inputs.enable_backup == 'true' && inputs.prev_run_id != '' }}
         shell: powershell
         run: |
-          $RestoreUrl = "${{ inputs.backup_url }}".Trim()
-          $TargetFolder = $env:BACKUP_PATH
-          New-Item -ItemType Directory -Force -Path $TargetFolder | Out-Null
-
-          if (-not [string]::IsNullOrWhiteSpace($RestoreUrl) -and $RestoreUrl -like "http*") {
-            Write-Host "Downloading backup from previous session: $RestoreUrl"
-            $ZipFile = "C:\restore_backup.zip"
-            curl.exe -L -s "$RestoreUrl" -o "$ZipFile"
-            if (Test-Path $ZipFile) {
-              Write-Host "Extracting files to $TargetFolder ..."
-              & "C:\Program Files\7-Zip\7z.exe" x "$ZipFile" -o"$TargetFolder" -y
-              Remove-Item $ZipFile -Force
-              Write-Host "Restore completed successfully!"
-            }
-          } else {
-            Write-Host "No previous backup URL provided. Starting fresh."
+          if (Test-Path "C:\RestoredBackup\backup_output.zip") {
+            & "C:\Program Files\7-Zip\7z.exe" x "C:\RestoredBackup\backup_output.zip" -o"C:\Users" -y
+            Write-Host "Files restored successfully to C:\Users!"
           }
 
       - name: Connect Tailscale
@@ -135,7 +156,6 @@ jobs:
         run: |
           $result = Test-NetConnection -ComputerName "127.0.0.1" -Port 3389
           if (-not $result.TcpTestSucceeded) { throw "RDP port 3389 is NOT open." }
-          Write-Host "RDP port 3389 is OPEN."
 
       - name: Show RDP information
         shell: powershell
@@ -155,49 +175,55 @@ jobs:
         run: |
           $runtime = [int]"${{ inputs.runtime_minutes }}"
           if ($runtime -lt 1 -or $runtime -gt 335) { $runtime = 335 }
-          Write-Host "Keeping RDP alive for $runtime minutes..."
           $end = (Get-Date).AddMinutes($runtime)
           while ((Get-Date) -lt $end) {
             Write-Host "$(Get-Date) - RDP is alive"
             Start-Sleep -Seconds 30
           }
-          Write-Host "Runtime finished."
 
       - name: Auto Backup Work before Shutdown
-        id: backup_step
         if: ${{ always() && inputs.enable_backup == 'true' }}
         shell: powershell
         run: |
-          $TargetFolder = $env:BACKUP_PATH
           $ArchivePath = "C:\backup_output.zip"
-          $DirectLink = ""
           
-          if (Test-Path $TargetFolder) {
-            Write-Host "Compressing $TargetFolder ..."
-            & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 -ssw "$ArchivePath" "$TargetFolder\*"
+          $UserFolders = Get-ChildItem -Path "C:\Users" -Directory | Where-Object { $_.Name -like "Bullettemporary*" }
+          $PathsToBackup = @()
+          foreach ($u in $UserFolders) {
+            if (Test-Path "$($u.FullName)\Downloads") { $PathsToBackup += "$($u.FullName)\Downloads" }
+            if (Test-Path "$($u.FullName)\Desktop")   { $PathsToBackup += "$($u.FullName)\Desktop" }
+          }
+
+          if ($PathsToBackup.Count -gt 0) {
+            Write-Host "Backing up folders: $($PathsToBackup -join ', ')"
+            Set-Location "C:\Users"
+            $RelativePaths = $PathsToBackup | ForEach-Object { $_.Replace("C:\Users\", "") }
+            & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 -ssw "$ArchivePath" $RelativePaths
             
             if (Test-Path $ArchivePath) {
               $SizeMB = [math]::Round((Get-Item $ArchivePath).Length / 1MB, 2)
-              
-              # 1. الرفع إلى GoFile
               $Server = (Invoke-RestMethod -Uri "https://api.gofile.io/servers").data.servers[0].name
               $Resp = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
               $GoFileLink = ($Resp | ConvertFrom-Json).data.downloadPage
               
-              # 2. الرفع المباشر إلى Litterbox لتمريره للسيرفر التالي تلقائياً
-              $DirectLink = (curl.exe -s -F "reqtype=fileupload" -F "time=72h" -F "fileToUpload=@$ArchivePath" "https://litterbox.catbox.moe/resources/internals/api.php").Trim()
-              
-              $Msg = "✅ [Workflow A] Backup Complete ($SizeMB MB)`nGoFile: $GoFileLink`nDirect Transfer URL: $DirectLink"
+              $Msg = "✅ [Workflow A] Backup Complete ($SizeMB MB)`nGoFile Link: $GoFileLink"
               Write-Host $Msg
               Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
-              Add-Content $env:GITHUB_STEP_SUMMARY "**Direct Link:** $DirectLink"
               
               if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
                 Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body $Msg
               }
             }
           }
-          "direct_url=$DirectLink" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload Artifact for Next Session Transfer
+        if: ${{ always() && inputs.enable_backup == 'true' }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: session-backup
+          path: C:\backup_output.zip
+          retention-days: 1
 
       - name: Start workflow B
         if: always()
@@ -207,10 +233,8 @@ jobs:
         run: |
           $repo = "${{ github.repository }}"
           $loops = [int]"${{ inputs.loops }}"
-          if ($loops -lt 1) {
-            Write-Host "No loops remaining. Stopping."
-            exit 0
-          }
+          if ($loops -lt 1) { exit 0 }
+          
           $body = @{
             ref = "main"
             inputs = @{
@@ -218,7 +242,7 @@ jobs:
               runtime_minutes = "${{ inputs.runtime_minutes }}"
               loops = "$loops"
               enable_backup = "${{ inputs.enable_backup }}"
-              backup_url = "${{ steps.backup_step.outputs.direct_url }}"
+              prev_run_id = "${{ github.run_id }}"
             }
           } | ConvertTo-Json -Depth 5
 
@@ -232,5 +256,3 @@ jobs:
             } `
             -Body $body `
             -ContentType "application/json"
-
-          Write-Host "Workflow B dispatched successfully."
