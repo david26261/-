@@ -94,33 +94,6 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Restart-Service TermService -Force
 
-      - name: Install Default Apps (WinRAR, Telegram, TeraBox)
-        shell: powershell
-        continue-on-error: true
-        run: |
-          Write-Host "Installing WinRAR..."
-          choco install winrar -y --no-progress
-
-          Write-Host "Installing Telegram Desktop (System-wide)..."
-          $tgSetup = "$env:TEMP\tsetup.exe"
-          curl.exe -L -s "https://telegram.org/dl/desktop/win64" -o "$tgSetup"
-          Start-Process -FilePath $tgSetup -ArgumentList "/VERYSILENT /NORESTART /ALLUSERS" -Wait
-
-          # إنشاء اختصار لـ Telegram على سطح المكتب العام ليظهر لجميع المستخدمين
-          if (Test-Path "C:\Program Files\Telegram Desktop\Telegram.exe") {
-            $WshShell = New-Object -ComObject WScript.Shell
-            $Shortcut = $WshShell.CreateShortcut("C:\Users\Public\Desktop\Telegram Desktop.lnk")
-            $Shortcut.TargetPath = "C:\Program Files\Telegram Desktop\Telegram.exe"
-            $Shortcut.Save()
-          }
-
-          Write-Host "Installing TeraBox Desktop..."
-          winget install --id Flextech.TeraBox --silent --accept-package-agreements --accept-source-agreements
-          
-          # نسخ اختصارات البرامج إلى سطح المكتب العام لضمان ظهورها فوراً
-          Copy-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Telegram Desktop\*.lnk" "C:\Users\Public\Desktop\" -Force -ErrorAction SilentlyContinue
-          Copy-Item "C:\Users\runneradmin\Desktop\*.lnk" "C:\Users\Public\Desktop\" -Force -ErrorAction SilentlyContinue
-
       - name: Download Backup from Previous Session
         if: ${{ inputs.enable_backup == 'true' && inputs.prev_run_id != '' }}
         uses: actions/download-artifact@v4
@@ -168,6 +141,76 @@ jobs:
           Add-Content $env:GITHUB_STEP_SUMMARY "RDP User: **$env:RDP_USER**"
           Add-Content $env:GITHUB_STEP_SUMMARY "Loops remaining: **${{ inputs.loops }}**"
           Add-Content $env:GITHUB_STEP_SUMMARY "Auto Backup Enabled: **${{ inputs.enable_backup }}**"
+
+      - name: Install WinRAR
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 4
+        run: |
+          Write-Host "Installing WinRAR via winget..."
+          winget install --id RARLab.WinRAR -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if (Test-Path "C:\Program Files\WinRAR\WinRAR.exe") {
+            $s = New-Object -ComObject WScript.Shell
+            $lnk = $s.CreateShortcut("C:\Users\Public\Desktop\WinRAR.lnk")
+            $lnk.TargetPath = "C:\Program Files\WinRAR\WinRAR.exe"
+            $lnk.Save()
+            Write-Host "WinRAR OK - shortcut created on Public Desktop"
+          } else {
+            Write-Host "WARNING: WinRAR.exe not found after install"
+          }
+
+      - name: Install Telegram Desktop
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 4
+        run: |
+          Write-Host "Installing Telegram Desktop..."
+          $tgSetup = "$env:TEMP\telegram-setup.exe"
+          curl.exe -L -s "https://telegram.org/dl/desktop/win64" -o "$tgSetup"
+          if ((Test-Path $tgSetup) -and ((Get-Item $tgSetup).Length -gt 10MB)) {
+            Start-Process -FilePath $tgSetup -ArgumentList "/VERYSILENT /NORESTART /ALLUSERS" -Wait
+          } else {
+            Write-Host "WARNING: Telegram download failed or too small, skipping install"
+          }
+          if (Test-Path "C:\Program Files\Telegram Desktop\Telegram.exe") {
+            $s = New-Object -ComObject WScript.Shell
+            $lnk = $s.CreateShortcut("C:\Users\Public\Desktop\Telegram Desktop.lnk")
+            $lnk.TargetPath = "C:\Program Files\Telegram Desktop\Telegram.exe"
+            $lnk.Save()
+            Write-Host "Telegram OK - shortcut created on Public Desktop"
+          } else {
+            Write-Host "WARNING: Telegram.exe not found after install"
+          }
+
+      - name: Install TeraBox Desktop
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 4
+        run: |
+          Write-Host "Installing TeraBox via winget..."
+          winget install --id Flextech.TeraBox -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          $tb = @(
+            "C:\Program Files\TeraBox\TeraBox.exe",
+            "C:\Program Files (x86)\TeraBox\TeraBox.exe",
+            "$env:APPDATA\TeraBox\TeraBox.exe",
+            "$env:LOCALAPPDATA\TeraBox\TeraBox.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($tb) {
+            $s = New-Object -ComObject WScript.Shell
+            $lnk = $s.CreateShortcut("C:\Users\Public\Desktop\TeraBox.lnk")
+            $lnk.TargetPath = $tb
+            $lnk.Save()
+            Write-Host "TeraBox OK - shortcut created pointing to $tb"
+          } else {
+            Write-Host "WARNING: TeraBox.exe not found (per-user install) - install it once from inside the RDP session"
+          }
+
+      - name: Verify Desktop shortcuts
+        shell: powershell
+        continue-on-error: true
+        run: |
+          Write-Host "=== Public Desktop contents ==="
+          Get-ChildItem "C:\Users\Public\Desktop" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
 
       - name: Keep RDP alive
         shell: powershell
