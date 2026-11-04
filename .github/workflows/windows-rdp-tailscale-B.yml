@@ -18,6 +18,11 @@ on:
         required: false
         default: "2"
 
+      backup_url:
+        description: "Direct URL to restore previous session backup"
+        required: false
+        default: ""
+
 concurrency:
   group: tailscale-rdp-singleton
   cancel-in-progress: false
@@ -47,18 +52,10 @@ jobs:
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
           GH_API_TOKEN: ${{ secrets.GH_API_TOKEN }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASS)) {
-            throw "Missing RDP_PASS secret"
-          }
-          if ([string]::IsNullOrWhiteSpace($env:TS_API_KEY)) {
-            throw "Missing TS_API_KEY secret"
-          }
-          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-            throw "Missing TS_AUTHKEY secret"
-          }
-          if ([string]::IsNullOrWhiteSpace($env:GH_API_TOKEN)) {
-            throw "Missing GH_API_TOKEN secret"
-          }
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASS)) { throw "Missing RDP_PASS secret" }
+          if ([string]::IsNullOrWhiteSpace($env:TS_API_KEY)) { throw "Missing TS_API_KEY secret" }
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) { throw "Missing TS_AUTHKEY secret" }
+          if ([string]::IsNullOrWhiteSpace($env:GH_API_TOKEN)) { throw "Missing GH_API_TOKEN secret" }
           Write-Host "All required secrets are available."
 
       - name: Install Tailscale
@@ -67,10 +64,7 @@ jobs:
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
           $installer = "$env:TEMP\tailscale-setup.exe"
           Invoke-WebRequest -Uri $url -OutFile $installer
-          Start-Process `
-            -FilePath $installer `
-            -ArgumentList "/quiet" `
-            -Wait
+          Start-Process -FilePath $installer -ArgumentList "/quiet" -Wait
           Start-Sleep -Seconds 5
           & "C:\Program Files\Tailscale\tailscale.exe" version
 
@@ -81,41 +75,39 @@ jobs:
         run: |
           $user = $env:RDP_USER
           $pass = $env:RDP_PASS
-          $secure = ConvertTo-SecureString `
-            $pass `
-            -AsPlainText `
-            -Force
-          $existing = Get-LocalUser `
-            -Name $user `
-            -ErrorAction SilentlyContinue
+          $secure = ConvertTo-SecureString $pass -AsPlainText -Force
+          $existing = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
           if ($existing) {
-            Set-LocalUser `
-              -Name $user `
-              -Password $secure
+            Set-LocalUser -Name $user -Password $secure
+          } else {
+            New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -UserMayNotChangePassword
           }
-          else {
-            New-LocalUser `
-              -Name $user `
-              -Password $secure `
-              -PasswordNeverExpires `
-              -UserMayNotChangePassword
-          }
-          Add-LocalGroupMember `
-            -Group "Administrators" `
-            -Member $user `
-            -ErrorAction SilentlyContinue
-          Add-LocalGroupMember `
-            -Group "Remote Desktop Users" `
-            -Member $user `
-            -ErrorAction SilentlyContinue
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name "fDenyTSConnections" `
-            -Value 0
-          Enable-NetFirewallRule `
-            -DisplayGroup "Remote Desktop"
+          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Restart-Service TermService -Force
-          Write-Host "Windows RDP configured successfully."
+
+      - name: Restore Files from Previous Session
+        shell: powershell
+        run: |
+          $RestoreUrl = "${{ inputs.backup_url }}".Trim()
+          $TargetFolder = $env:BACKUP_PATH
+          New-Item -ItemType Directory -Force -Path $TargetFolder | Out-Null
+
+          if (-not [string]::IsNullOrWhiteSpace($RestoreUrl) -and $RestoreUrl -like "http*") {
+            Write-Host "Downloading backup from previous session: $RestoreUrl"
+            $ZipFile = "C:\restore_backup.zip"
+            curl.exe -L -s "$RestoreUrl" -o "$ZipFile"
+            if (Test-Path $ZipFile) {
+              Write-Host "Extracting files to $TargetFolder ..."
+              & "C:\Program Files\7-Zip\7z.exe" x "$ZipFile" -o"$TargetFolder" -y
+              Remove-Item $ZipFile -Force
+              Write-Host "Restore completed successfully!"
+            }
+          } else {
+            Write-Host "No previous backup URL provided. Starting fresh."
+          }
 
       - name: Connect Tailscale
         shell: powershell
@@ -123,73 +115,35 @@ jobs:
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
         run: |
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
-          & $ts up `
-            --authkey="$env:TS_AUTHKEY" `
-            --hostname="$env:TS_HOSTNAME" `
-            --accept-routes `
-            --accept-dns=false
+          & $ts up --authkey="$env:TS_AUTHKEY" --hostname="$env:TS_HOSTNAME" --accept-routes --accept-dns=false
           Start-Sleep -Seconds 8
-          Write-Host ""
-          Write-Host "===== TAILSCALE STATUS ====="
           & $ts status
-          Write-Host ""
-          Write-Host "===== TAILSCALE IPv4 ====="
           & $ts ip -4
 
       - name: Test RDP availability
         shell: powershell
         run: |
-          Write-Host "Testing local RDP port 3389..."
-          $result = Test-NetConnection `
-            -ComputerName "127.0.0.1" `
-            -Port 3389
-          if (-not $result.TcpTestSucceeded) {
-            throw "RDP port 3389 is NOT open."
-          }
+          $result = Test-NetConnection -ComputerName "127.0.0.1" -Port 3389
+          if (-not $result.TcpTestSucceeded) { throw "RDP port 3389 is NOT open." }
           Write-Host "RDP port 3389 is OPEN."
 
       - name: Show RDP information
         shell: powershell
         run: |
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
-          $ip = (
-            & $ts ip -4 |
-            Select-Object -First 1
-          ).Trim()
-          Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "RDP USER: $env:RDP_USER"
-          Write-Host "TAILSCALE IP: $ip"
-          Write-Host "HOSTNAME: $env:TS_HOSTNAME"
-          Write-Host "LOOPS: ${{ inputs.loops }}"
-          Write-Host "=========================================="
-          Add-Content `
-            $env:GITHUB_STEP_SUMMARY `
-            "### Windows RDP via Tailscale (B)"
-          Add-Content `
-            $env:GITHUB_STEP_SUMMARY `
-            ""
-          Add-Content `
-            $env:GITHUB_STEP_SUMMARY `
-            "Tailscale IP: **$ip**"
-          Add-Content `
-            $env:GITHUB_STEP_SUMMARY `
-            "Hostname: **$env:TS_HOSTNAME**"
-          Add-Content `
-            $env:GITHUB_STEP_SUMMARY `
-            "RDP User: **$env:RDP_USER**"
-          Add-Content `
-            $env:GITHUB_STEP_SUMMARY `
-            "Loops remaining: **${{ inputs.loops }}**"
+          $ip = (& $ts ip -4 | Select-Object -First 1).Trim()
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Windows RDP via Tailscale (B)"
+          Add-Content $env:GITHUB_STEP_SUMMARY "Tailscale IP: **$ip**"
+          Add-Content $env:GITHUB_STEP_SUMMARY "Hostname: **$env:TS_HOSTNAME**"
+          Add-Content $env:GITHUB_STEP_SUMMARY "RDP User: **$env:RDP_USER**"
+          Add-Content $env:GITHUB_STEP_SUMMARY "Loops remaining: **${{ inputs.loops }}**"
 
       - name: Keep RDP alive
         shell: powershell
         continue-on-error: true
         run: |
           $runtime = [int]"${{ inputs.runtime_minutes }}"
-          if ($runtime -lt 1 -or $runtime -gt 335) {
-            $runtime = 335
-          }
+          if ($runtime -lt 1 -or $runtime -gt 335) { $runtime = 335 }
           Write-Host "Keeping RDP alive for $runtime minutes..."
           $end = (Get-Date).AddMinutes($runtime)
           while ((Get-Date) -lt $end) {
@@ -199,11 +153,13 @@ jobs:
           Write-Host "Runtime finished."
 
       - name: Auto Backup Work before Shutdown
+        id: backup_step
         if: always()
         shell: powershell
         run: |
           $TargetFolder = $env:BACKUP_PATH
           $ArchivePath = "C:\backup_output.zip"
+          $DirectLink = ""
           
           if (Test-Path $TargetFolder) {
             Write-Host "Compressing $TargetFolder ..."
@@ -211,19 +167,26 @@ jobs:
             
             if (Test-Path $ArchivePath) {
               $SizeMB = [math]::Round((Get-Item $ArchivePath).Length / 1MB, 2)
+              
+              # 1. الرفع إلى GoFile
               $Server = (Invoke-RestMethod -Uri "https://api.gofile.io/servers").data.servers[0].name
               $Resp = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
-              $Link = ($Resp | ConvertFrom-Json).data.downloadPage
+              $GoFileLink = ($Resp | ConvertFrom-Json).data.downloadPage
               
-              $Msg = "✅ [Workflow B] Auto-Backup Complete! Size: $SizeMB MB | GoFile Link: $Link"
+              # 2. الرفع المباشر إلى Litterbox لتمريره للسيرفر التالي تلقائياً
+              $DirectLink = (curl.exe -s -F "reqtype=fileupload" -F "time=72h" -F "fileToUpload=@$ArchivePath" "https://litterbox.catbox.moe/resources/internals/api.php").Trim()
+              
+              $Msg = "✅ [Workflow B] Backup Complete ($SizeMB MB)`nGoFile: $GoFileLink`nDirect Transfer URL: $DirectLink"
               Write-Host $Msg
-              Add-Content $env:GITHUB_STEP_SUMMARY "**Backup Link:** $Link ($SizeMB MB)"
+              Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
+              Add-Content $env:GITHUB_STEP_SUMMARY "**Direct Link:** $DirectLink"
               
               if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
                 Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body $Msg
               }
             }
           }
+          "direct_url=$DirectLink" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Start workflow A or stop
         if: always()
@@ -234,25 +197,20 @@ jobs:
           $repo = "${{ github.repository }}"
           $loops = [int]"${{ inputs.loops }}"
           if ($loops -le 1) {
-            Write-Host ""
-            Write-Host "=========================================="
-            Write-Host "FINAL B RUN COMPLETED"
-            Write-Host "No more loops."
-            Write-Host "Workflow chain stopped."
-            Write-Host "=========================================="
+            Write-Host "FINAL B RUN COMPLETED. Workflow chain stopped."
             exit 0
           }
           $nextLoops = $loops - 1
-          Write-Host "Starting workflow A..."
-          Write-Host "Next loops value: $nextLoops"
           $body = @{
             ref = "main"
             inputs = @{
               test_mode = "${{ inputs.test_mode }}"
               runtime_minutes = "${{ inputs.runtime_minutes }}"
               loops = "$nextLoops"
+              backup_url = "${{ steps.backup_step.outputs.direct_url }}"
             }
           } | ConvertTo-Json -Depth 5
+
           Invoke-RestMethod `
             -Method POST `
             -Uri "https://api.github.com/repos/$repo/actions/workflows/windows-rdp-tailscale-A.yml/dispatches" `
@@ -263,4 +221,5 @@ jobs:
             } `
             -Body $body `
             -ContentType "application/json"
-          Write-Host "Workflow A dispatched successfully."
+
+          Write-Host "Workflow A dispatched successfully with backup URL."
