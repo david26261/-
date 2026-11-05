@@ -163,7 +163,7 @@ jobs:
           }
           Write-Host "Installing WinRAR (direct download, silent)..."
           $wr = "$env:TEMP\winrar-setup.exe"
-          curl.exe -L -s "https://www.win-rar.com/fileadmin/winrar-versions/winrar-x64-723.exe" -o "$wr"
+          curl.exe -L -f -s --connect-timeout 20 --max-time 120 --retry 2 "https://www.win-rar.com/fileadmin/winrar-versions/winrar-x64-723.exe" -o "$wr"
           if ((Test-Path $wr) -and ((Get-Item $wr).Length -gt 2MB)) {
             Start-Process -FilePath $wr -ArgumentList "/S" -Wait
           }
@@ -196,12 +196,24 @@ jobs:
           }
           Write-Host "Downloading Telegram portable (official zip - no installer)..."
           $tgZip = "$env:TEMP\telegram-portable.zip"
-          curl.exe -L -s "https://telegram.org/dl/desktop/win64_portable" -o "$tgZip"
+          # Hard time caps: a stalled download can never hang this step again
+          curl.exe -L -f -s --connect-timeout 20 --max-time 90 --retry 2 "https://telegram.org/dl/desktop/win64_portable" -o "$tgZip"
+          if (-not ((Test-Path $tgZip) -and ((Get-Item $tgZip).Length -gt 20MB))) {
+            Write-Host "telegram.org slow or failed - falling back to Telegram official GitHub release..."
+            try {
+              $rel = Invoke-RestMethod "https://api.github.com/repos/telegramdesktop/tdesktop/releases/latest" -Headers @{ "User-Agent" = "Mozilla/5.0" }
+              $asset = $rel.assets | Where-Object { $_.name -like "tportable-x64*.zip" } | Select-Object -First 1
+              if ($asset) {
+                Write-Host "Downloading $($asset.name) from GitHub..."
+                curl.exe -L -f -s --connect-timeout 20 --max-time 180 --retry 2 $asset.browser_download_url -o "$tgZip"
+              }
+            } catch { Write-Host "GitHub fallback failed: $_" }
+          }
           if ((Test-Path $tgZip) -and ((Get-Item $tgZip).Length -gt 20MB)) {
             New-Item -ItemType Directory -Force -Path "C:\Apps" | Out-Null
             & "C:\Program Files\7-Zip\7z.exe" x "$tgZip" -o"C:\Apps" -y
           } else {
-            Write-Host "WARNING: Telegram portable download failed or file too small"
+            Write-Host "WARNING: Telegram download failed on both sources"
           }
           if (Test-Path "C:\Apps\Telegram\Telegram.exe") {
             New-DeskShortcut "C:\Apps\Telegram\Telegram.exe" "Telegram Desktop"
@@ -213,7 +225,7 @@ jobs:
       - name: Install TeraBox Desktop
         shell: powershell
         continue-on-error: true
-        timeout-minutes: 8
+        timeout-minutes: 10
         run: |
           function New-DeskShortcut($exe, $name) {
             foreach ($desk in @("C:\Users\Public\Desktop", "C:\Users\$env:RDP_USER\Desktop")) {
@@ -226,44 +238,106 @@ jobs:
               }
             }
           }
-          Write-Host "winget does not exist on this runner - installing winget itself first..."
-          $wg = $null
-          curl.exe -L -s "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx" -o "$env:TEMP\vclibs.appx"
-          Add-AppxPackage "$env:TEMP\vclibs.appx" -ErrorAction SilentlyContinue
-          curl.exe -L -s "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx" -o "$env:TEMP\uixaml.appx"
-          Add-AppxPackage "$env:TEMP\uixaml.appx" -ErrorAction SilentlyContinue
-          foreach ($v in @("v1.9.25200", "v1.8.1911", "v1.7.11261")) {
-            curl.exe -L -s "https://github.com/microsoft/winget-cli/releases/download/$v/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -o "$env:TEMP\winget.msixbundle"
-            try {
-              Add-AppxPackage "$env:TEMP\winget.msixbundle" -ErrorAction Stop
-              Write-Host "winget installed ($v)"
-              break
-            } catch { Write-Host "winget version $v failed, trying next" }
-          }
-          $wg = Get-ChildItem "C:\Program Files\WindowsApps" -Recurse -Filter winget.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-          if ($wg) {
-            Write-Host "Installing TeraBox with winget at $wg"
-            & $wg install --id Flextech.TeraBox -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-            $tbExe = @(
+          function Find-TeraBox {
+            $cands = @(
               "C:\Program Files\TeraBox\TeraBox.exe",
               "C:\Program Files (x86)\TeraBox\TeraBox.exe",
               "$env:APPDATA\TeraBox\TeraBox.exe",
               "C:\Users\runneradmin\AppData\Roaming\TeraBox\TeraBox.exe",
-              "$env:LOCALAPPDATA\TeraBox\TeraBox.exe"
-            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-            if ($tbExe -and $tbExe -like "*AppData*") {
+              "$env:LOCALAPPDATA\TeraBox\TeraBox.exe",
+              "C:\Users\runneradmin\AppData\Local\TeraBox\TeraBox.exe",
+              "C:\Users\runneradmin\AppData\Local\Programs\TeraBox\TeraBox.exe"
+            )
+            $hit = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($hit) { return $hit }
+            return (Get-ChildItem "C:\Users\runneradmin\AppData", "C:\Program Files", "C:\Program Files (x86)" -Recurse -Filter "TeraBox.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
+          }
+          $tbExe = $null
+
+          # ---------- Method 1: official direct installer (no winget at all) ----------
+          Write-Host "Method 1: TeraBox official direct installer..."
+          $tbUrl = $null
+          try {
+            $page = curl.exe -L -f -s --connect-timeout 20 --max-time 60 "https://www.terabox.com/terabox-cloud-storage-for-pc-free-download"
+            $m = [regex]::Match(($page -join "`n"), "https://data\.nephobox\.com/[^\s""']+?\.exe")
+            if ($m.Success) { $tbUrl = $m.Value; Write-Host "Live installer URL from terabox.com: $tbUrl" }
+          } catch { Write-Host "Could not read terabox.com download page" }
+          if (-not $tbUrl) {
+            $tbUrl = "https://data.nephobox.com/issue/terabox/PCTeraBox/Terabox_1.49.5.183.exe"
+            Write-Host "Using pinned installer URL: $tbUrl"
+          }
+          $tbSetup = "$env:TEMP\TeraBoxSetup.exe"
+          curl.exe -L -f -s --connect-timeout 20 --max-time 300 --retry 2 "$tbUrl" -o "$tbSetup"
+          if ((Test-Path $tbSetup) -and ((Get-Item $tbSetup).Length -gt 30MB)) {
+            Write-Host ("Installer downloaded: " + [math]::Round((Get-Item $tbSetup).Length / 1MB, 1) + " MB - installing silently (/S)...")
+            $p = Start-Process "$tbSetup" -ArgumentList "/S" -PassThru
+            for ($i = 0; $i -lt 24; $i++) {
+              Start-Sleep -Seconds 5
+              $tbExe = Find-TeraBox
+              if ($tbExe) { break }
+              if ($p.HasExited) { break }
+            }
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            if (-not $tbExe) {
+              # installer may have spawned a detached child - give it a few more seconds
+              for ($i = 0; $i -lt 6; $i++) { Start-Sleep -Seconds 5; $tbExe = Find-TeraBox; if ($tbExe) { break } }
+            }
+          } else {
+            Write-Host "WARNING: TeraBox installer download failed or too small"
+          }
+
+          # ---------- Method 2: winget WITH its license file ----------
+          # v4 installed winget with Add-AppxPackage only, so it refused to run:
+          # "No applicable app licenses found". The license XML from the same
+          # GitHub release must be injected with Add-AppxProvisionedPackage.
+          if (-not $tbExe) {
+            Write-Host "Method 2: winget with license provisioning..."
+            curl.exe -L -f -s --connect-timeout 20 --max-time 180 --retry 2 "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx" -o "$env:TEMP\vclibs.appx"
+            Add-AppxPackage "$env:TEMP\vclibs.appx" -ErrorAction SilentlyContinue
+            curl.exe -L -f -s --connect-timeout 20 --max-time 180 --retry 2 "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx" -o "$env:TEMP\uixaml.appx"
+            Add-AppxPackage "$env:TEMP\uixaml.appx" -ErrorAction SilentlyContinue
+            try {
+              $rel = Invoke-RestMethod "https://api.github.com/repos/microsoft/winget-cli/releases/tags/v1.8.1911" -Headers @{ "User-Agent" = "Mozilla/5.0" }
+              $bundleAsset = $rel.assets | Where-Object { $_.name -like "*.msixbundle" } | Select-Object -First 1
+              $licAsset = $rel.assets | Where-Object { $_.name -like "*License1.xml" } | Select-Object -First 1
+              if ($bundleAsset) { curl.exe -L -f -s --connect-timeout 20 --max-time 180 --retry 1 $bundleAsset.browser_download_url -o "$env:TEMP\winget.msixbundle" }
+              if ($licAsset) { curl.exe -L -f -s --connect-timeout 20 --max-time 60 --retry 1 $licAsset.browser_download_url -o "$env:TEMP\winget-license.xml"; Write-Host ("License file: " + $licAsset.name) }
+            } catch { Write-Host "winget release lookup failed" }
+            if (Test-Path "$env:TEMP\winget.msixbundle") {
+              Add-AppxPackage "$env:TEMP\winget.msixbundle" -ErrorAction SilentlyContinue
+              if (Test-Path "$env:TEMP\winget-license.xml") {
+                try {
+                  Add-AppxProvisionedPackage -Online -PackagePath "$env:TEMP\winget.msixbundle" -LicensePath "$env:TEMP\winget-license.xml" -ErrorAction Stop | Out-Null
+                  Write-Host "winget provisioned WITH license"
+                } catch { Write-Host "Provisioning failed" }
+              }
+            }
+            $wg = Get-ChildItem "C:\Program Files\WindowsApps" -Recurse -Filter winget.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+            if ($wg) {
+              $ver = & $wg --version 2>$null
+              Write-Host "winget smoke test: $ver"
+              if ($ver) {
+                & $wg install --id Flextech.TeraBox -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+                $tbExe = Find-TeraBox
+              } else {
+                Write-Host "WARNING: winget still refuses to run (license)"
+              }
+            } else {
+              Write-Host "WARNING: winget.exe not found after install"
+            }
+          }
+
+          # ---------- Finish: one machine-wide location + shortcuts ----------
+          if ($tbExe) {
+            if ($tbExe -like "*AppData*") {
               Write-Host "TeraBox installed per-user at $tbExe - copying program folder to Program Files"
               Copy-Item (Split-Path $tbExe) "C:\Program Files\TeraBox" -Recurse -Force -ErrorAction SilentlyContinue
               if (Test-Path "C:\Program Files\TeraBox\TeraBox.exe") { $tbExe = "C:\Program Files\TeraBox\TeraBox.exe" }
             }
-            if ($tbExe) {
-              New-DeskShortcut $tbExe "TeraBox"
-              Write-Host "TeraBox OK - $tbExe"
-            } else {
-              Write-Host "WARNING: TeraBox.exe not found anywhere after winget install"
-            }
+            New-DeskShortcut $tbExe "TeraBox"
+            Write-Host "TeraBox OK - $tbExe"
           } else {
-            Write-Host "WARNING: winget bootstrap failed - TeraBox skipped this run"
+            Write-Host "WARNING: TeraBox.exe not found after BOTH methods"
           }
 
       - name: Verify Desktop shortcuts
@@ -275,7 +349,7 @@ jobs:
           Write-Host "=== Installed check ==="
           Write-Host ("WinRAR:   " + (Test-Path "C:\Program Files\WinRAR\WinRAR.exe"))
           Write-Host ("Telegram: " + (Test-Path "C:\Apps\Telegram\Telegram.exe"))
-          Write-Host ("TeraBox:  " + (Test-Path "C:\Program Files\TeraBox\TeraBox.exe"))
+          Write-Host ("TeraBox:  " + ((Test-Path "C:\Program Files\TeraBox\TeraBox.exe") -or (Test-Path "C:\Users\Public\Desktop\TeraBox.lnk")))
 
       - name: Connect Tailscale
         shell: powershell
