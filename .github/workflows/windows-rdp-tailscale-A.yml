@@ -70,7 +70,7 @@ jobs:
         run: |
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
           $installer = "$env:TEMP\tailscale-setup.exe"
-          Invoke-WebRequest -Uri $url -OutFile $installer
+          Invoke-WebRequest -Uri $url -OutFile$installer
           Start-Process -FilePath $installer -ArgumentList "/quiet" -Wait
           Start-Sleep -Seconds 5
 
@@ -79,14 +79,14 @@ jobs:
         env:
           RDP_PASS: ${{ secrets.RDP_PASS }}
         run: |
-          $user = $env:RDP_USER
-          $pass = $env:RDP_PASS
-          $secure = ConvertTo-SecureString $pass -AsPlainText -Force
-          $existing = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+          $user =$env:RDP_USER
+          $pass =$env:RDP_PASS
+          $secure = ConvertTo-SecureString$pass -AsPlainText -Force
+          $existing = Get-LocalUser -Name$user -ErrorAction SilentlyContinue
           if ($existing) {
-            Set-LocalUser -Name $user -Password $secure
+            Set-LocalUser -Name $user -Password$secure
           } else {
-            New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -UserMayNotChangePassword
+            New-LocalUser -Name $user -Password$secure -PasswordNeverExpires -UserMayNotChangePassword
           }
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
@@ -99,11 +99,11 @@ jobs:
         continue-on-error: true
         run: |
           $PublicDesktop = "C:\Users\Public\Desktop"
+          $WshShell = New-Object -ComObject WScript.Shell
 
           Write-Host "1. Installing WinRAR..."
           choco install winrar -y --no-progress
           if (Test-Path "C:\Program Files\WinRAR\WinRAR.exe") {
-            $WshShell = New-Object -ComObject WScript.Shell
             $Shortcut = $WshShell.CreateShortcut("$PublicDesktop\WinRAR.lnk")
             $Shortcut.TargetPath = "C:\Program Files\WinRAR\WinRAR.exe"
             $Shortcut.Save()
@@ -113,29 +113,41 @@ jobs:
           $tgZip = "$env:TEMP\tg_portable.zip"
           curl.exe -L -s "https://telegram.org/dl/desktop/win64_portable" -o "$tgZip"
           & "C:\Program Files\7-Zip\7z.exe" x "$tgZip" -o"C:\TelegramApp" -y
-          
           if (Test-Path "C:\TelegramApp\Telegram\Telegram.exe") {
-            $WshShell = New-Object -ComObject WScript.Shell
             $Shortcut = $WshShell.CreateShortcut("$PublicDesktop\Telegram Desktop.lnk")
             $Shortcut.TargetPath = "C:\TelegramApp\Telegram\Telegram.exe"
             $Shortcut.Save()
-            Write-Host "Telegram shortcut created on Public Desktop!"
           }
 
           Write-Host "3. Downloading & Installing TeraBox..."
-          $tbInstaller = "$PublicDesktop\TeraBox_Setup.exe"
-          curl.exe -L -s -A "Mozilla/5.0" "https://data.nephobox.com/issue/terabox/PCDownload/TeraBox_1.29.0.4.exe" -o "$tbInstaller"
-          
-          if ((Test-Path $tbInstaller) -and ((Get-Item $tbInstaller).Length -gt 10MB)) {
-            Start-Process -FilePath $tbInstaller -ArgumentList "/S"
-            Start-Sleep -Seconds 15
-          } else {
-            Remove-Item $tbInstaller -Force -ErrorAction SilentlyContinue
-            choco install terabox -y --no-progress
+          try {
+            $api = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/f/Flextech/TeraBox"
+            $latestVer = ($api \vert{} Where-Object {$_.type -eq "dir" } | Select-Object -Last 1).name
+            $yamlUrl = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/f/Flextech/TeraBox/$latestVer/Flextech.TeraBox.installer.yaml"
+            $yaml = Invoke-RestMethod -Uri$yamlUrl
+            $dlUrl = [regex]::Match($yaml, 'InstallerUrl:\s*(https://[^\s]+)').Groups[1].Value
+
+            $tbInstaller = "$PublicDesktop\TeraBox_Setup.exe"
+            curl.exe -L -s "$dlUrl" -H "Referer: https://www.terabox.com/" -A "Mozilla/5.0" -o "$tbInstaller"
+
+            if ((Test-Path $tbInstaller) -and ((Get-Item$tbInstaller).Length -gt 10MB)) {
+              # Extraction directe avec 7-Zip dans C:\TeraBoxApp pour que tous les utilisateurs y aient accès
+              & "C:\Program Files\7-Zip\7z.exe" x "$tbInstaller" -o"C:\TeraBoxApp" -y | Out-Null
+              if (Test-Path "C:\TeraBoxApp\TeraBox.exe") {
+                $Shortcut = $WshShell.CreateShortcut("$PublicDesktop\TeraBox.lnk")
+                $Shortcut.TargetPath = "C:\TeraBoxApp\TeraBox.exe"
+                $Shortcut.Save()
+                Remove-Item $tbInstaller -Force -ErrorAction SilentlyContinue
+              } else {
+                Start-Process -FilePath $tbInstaller -ArgumentList "/S"
+              }
+              Write-Host "TeraBox ready on Public Desktop!"
+            }
+          } catch {
+            Write-Host "TeraBox auto-fetch warning: $_"
           }
 
-          Copy-Item "C:\Users\runneradmin\Desktop\*.lnk" "$PublicDesktop\" -Force -ErrorAction SilentlyContinue
-          Copy-Item "C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\**\*.lnk" "$PublicDesktop\" -Force -ErrorAction SilentlyContinue
+          exit 0
 
       - name: Download Backup from Previous Session
         if: ${{ inputs.enable_backup == 'true' && inputs.prev_run_id != '' }}
@@ -177,7 +189,7 @@ jobs:
         shell: powershell
         run: |
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
-          $ip = (& $ts ip -4 | Select-Object -First 1).Trim()
+          $ip = (&$ts ip -4 | Select-Object -First 1).Trim()
           Add-Content $env:GITHUB_STEP_SUMMARY "### Windows RDP via Tailscale (A)"
           Add-Content $env:GITHUB_STEP_SUMMARY "Tailscale IP: **$ip**"
           Add-Content $env:GITHUB_STEP_SUMMARY "Hostname: **$env:TS_HOSTNAME**"
@@ -190,7 +202,7 @@ jobs:
         continue-on-error: true
         run: |
           $runtime = [int]"${{ inputs.runtime_minutes }}"
-          if ($runtime -lt 1 -or $runtime -gt 335) { $runtime = 335 }
+          if ($runtime -lt 1 -or $runtime -gt 335) {$runtime = 335 }
           $end = (Get-Date).AddMinutes($runtime)
           while ((Get-Date) -lt $end) {
             Write-Host "$(Get-Date) - RDP is alive"
@@ -203,9 +215,9 @@ jobs:
         run: |
           $ArchivePath = "C:\backup_output.zip"
           
-          $UserFolders = Get-ChildItem -Path "C:\Users" -Directory | Where-Object { $_.Name -like "Bullettemporary*" }
+          $UserFolders = Get-ChildItem -Path "C:\Users" -Directory \vert{} Where-Object { $_.Name -like "Bullettemporary*" }
           $PathsToBackup = @()
-          foreach ($u in $UserFolders) {
+          foreach ($u in$UserFolders) {
             if (Test-Path "$($u.FullName)\Downloads") { $PathsToBackup += "$($u.FullName)\Downloads" }
             if (Test-Path "$($u.FullName)\Desktop")   { $PathsToBackup += "$($u.FullName)\Desktop" }
           }
@@ -213,12 +225,10 @@ jobs:
           if ($PathsToBackup.Count -gt 0) {
             Write-Host "Backing up folders: $($PathsToBackup -join ', ')"
             Set-Location "C:\Users"
-            $RelativePaths = $PathsToBackup | ForEach-Object { $_.Replace("C:\Users\", "") }
+            $RelativePaths = $PathsToBackup \vert{} ForEach-Object {$_.Replace("C:\Users\", "") }
             & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 -ssw "$ArchivePath" $RelativePaths
             
-            if (Test-Path $ArchivePath) {
-              $SizeMB = [math]::Round((Get-Item $ArchivePath).Length / 1MB, 2)
-              $Server = (Invoke-RestMethod -Uri "https://api.gofile.io/servers").data.servers[0].name
+            if (Test-Path $ArchivePath) {$SizeMB = [math]::Round((Get-Item $ArchivePath).Length / 1MB, 2)$Server = (Invoke-RestMethod -Uri "https://api.gofile.io/servers").data.servers[0].name
               $Resp = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
               $GoFileLink = ($Resp | ConvertFrom-Json).data.downloadPage
               
