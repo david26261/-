@@ -80,14 +80,14 @@ jobs:
         env:
           RDP_PASS: ${{ secrets.RDP_PASS }}
         run: |
-          $user =$env:RDP_USER
-          $pass =$env:RDP_PASS
-          $secure = ConvertTo-SecureString$pass -AsPlainText -Force
-          $existing = Get-LocalUser -Name$user -ErrorAction SilentlyContinue
+          $user = $env:RDP_USER
+          $pass = $env:RDP_PASS
+          $secure = ConvertTo-SecureString $pass -AsPlainText -Force
+          $existing = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
           if ($existing) {
-            Set-LocalUser -Name $user -Password$secure
+            Set-LocalUser -Name $user -Password $secure
           } else {
-            New-LocalUser -Name $user -Password$secure -PasswordNeverExpires -UserMayNotChangePassword
+            New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -UserMayNotChangePassword
           }
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
@@ -122,9 +122,10 @@ jobs:
 
           Write-Host "3. Downloading TeraBox..."
           $yamlUrl = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/f/Flextech/TeraBox/1.38.0/Flextech.TeraBox.installer.yaml"
-          $yaml = Invoke-RestMethod -Uri$yamlUrl -ErrorAction SilentlyContinue
+          $yaml = Invoke-RestMethod -Uri $yamlUrl -ErrorAction SilentlyContinue
           $dlUrl = [regex]::Match($yaml, 'InstallerUrl:\s*(https://[^\s]+)').Groups[1].Value
-          if ([string]::IsNullOrWhiteSpace($dlUrl)) {$dlUrl = "https://data.nephobox.com/issue/terabox/PCDownload/TeraBox_1.38.0.exe"
+          if ([string]::IsNullOrWhiteSpace($dlUrl)) {
+            $dlUrl = "https://data.nephobox.com/issue/terabox/PCDownload/TeraBox_1.38.0.exe"
           }
           $tbInstaller = "$PublicDesktop\TeraBox_Setup.exe"
           curl.exe -L -s "$dlUrl" -H "Referer: https://www.terabox.com/" -A "Mozilla/5.0" -o "$tbInstaller"
@@ -178,7 +179,7 @@ jobs:
         shell: powershell
         run: |
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
-          $ipList = &$ts ip -4
+          $ipList = & $ts ip -4
           $ip = "$ipList".Trim()
           Add-Content $env:GITHUB_STEP_SUMMARY "### Windows RDP via Tailscale (A)"
           Add-Content $env:GITHUB_STEP_SUMMARY "Tailscale IP: **$ip**"
@@ -192,8 +193,8 @@ jobs:
         continue-on-error: true
         run: |
           $runtime = [int]"${{ inputs.runtime_minutes }}"
-          if ($runtime -lt 1) {$runtime = 335 }
-          if ($runtime -gt 335) {$runtime = 335 }
+          if ($runtime -lt 1) { $runtime = 335 }
+          if ($runtime -gt 335) { $runtime = 335 }
           $end = (Get-Date).AddMinutes($runtime)
           while ((Get-Date) -lt $end) {
             Write-Host "$(Get-Date) - RDP is alive"
@@ -211,17 +212,21 @@ jobs:
           # ضغط مجلدات المستخدم مباشرة بدون حلقات معقدة أو رموز قد تتشوه
           & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 -ssw "$ArchivePath" "Bullettemporary*\Desktop" "Bullettemporary*\Downloads"
           
-          if (Test-Path $ArchivePath) {$FileItem = Get-Item $ArchivePath$SizeMB = [math]::Round($FileItem.Length / 1MB, 2)$ServerResp = Invoke-RestMethod -Uri "https://api.gofile.io/servers"
-            $Server = $ServerResp.data.servers[0].name$RespRaw = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
-            $RespJson = ConvertFrom-Json$RespRaw
-            $GoFileLink =$RespJson.data.downloadPage
+          if (Test-Path $ArchivePath) {
+            $FileItem = Get-Item $ArchivePath
+            $SizeMB = [math]::Round($FileItem.Length / 1MB, 2)
+            $ServerResp = Invoke-RestMethod -Uri "https://api.gofile.io/servers"
+            $Server = $ServerResp.data.servers[0].name
+            $RespRaw = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
+            $RespJson = ConvertFrom-Json $RespRaw
+            $GoFileLink = $RespJson.data.downloadPage
             
-            $Msg = "✅ [Workflow A] Backup Complete ($SizeMB MB) - GoFile Link:$GoFileLink"
+            $Msg = "✅ [Workflow A] Backup Complete ($SizeMB MB) - GoFile Link: $GoFileLink"
             Write-Host $Msg
             Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
             
             if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
-              Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body$Msg
+              Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body $Msg
             }
           }
 
@@ -242,11 +247,27 @@ jobs:
         run: |
           $repo = "${{ github.repository }}"
           $loops = [int]"${{ inputs.loops }}"
-          if ($loops -lt 1) { exit 0 }$payload = @{
+          if ($loops -lt 1) { exit 0 }
+          
+          $payload = @{
             ref = "main"
             inputs = @{
               test_mode = "${{ inputs.test_mode }}"
               runtime_minutes = "${{ inputs.runtime_minutes }}"
               loops = "$loops"
               enable_backup = "${{ inputs.enable_backup }}"
-              prev_run_id = "${{
+              prev_run_id = "${{ github.run_id }}"
+            }
+          }
+          $body = ConvertTo-Json $payload -Depth 5
+
+          Invoke-RestMethod `
+            -Method POST `
+            -Uri "https://api.github.com/repos/$repo/actions/workflows/windows-rdp-tailscale-B.yml/dispatches" `
+            -Headers @{
+              Authorization = "Bearer $env:GH_TOKEN"
+              Accept = "application/vnd.github+json"
+              "X-GitHub-Api-Version" = "2022-11-28"
+            } `
+            -Body $body `
+            -ContentType "application/json"
