@@ -70,9 +70,10 @@ jobs:
         run: |
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
           $installer = "$env:TEMP\tailscale-setup.exe"
-          Invoke-WebRequest -Uri $url -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList "/quiet" -Wait
+          curl.exe -L --retry 5 --retry-delay 3 -s "$url" -o "$installer"
+          Start-Process -FilePath "$installer" -ArgumentList "/quiet" -Wait
           Start-Sleep -Seconds 5
+          & "C:\Program Files\Tailscale\tailscale.exe" version
 
       - name: Configure Windows RDP
         shell: powershell
@@ -109,7 +110,7 @@ jobs:
             $Shortcut.Save()
           }
 
-          Write-Host "2. Installing Telegram Desktop (Portable to Public Desktop)..."
+          Write-Host "2. Installing Telegram Desktop..."
           $tgZip = "$env:TEMP\tg_portable.zip"
           curl.exe -L -s "https://telegram.org/dl/desktop/win64_portable" -o "$tgZip"
           & "C:\Program Files\7-Zip\7z.exe" x "$tgZip" -o"C:\TelegramApp" -y
@@ -119,33 +120,23 @@ jobs:
             $Shortcut.Save()
           }
 
-          Write-Host "3. Downloading & Installing TeraBox..."
-          try {
-            $api = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/f/Flextech/TeraBox"
-            $latestVer = ($api | Where-Object { $_.type -eq "dir" } | Select-Object -Last 1).name
-            $yamlUrl = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/f/Flextech/TeraBox/$latestVer/Flextech.TeraBox.installer.yaml"
-            $yaml = Invoke-RestMethod -Uri $yamlUrl
-            $dlUrl = [regex]::Match($yaml, 'InstallerUrl:\s*(https://[^\s]+)').Groups[1].Value
-
-            $tbInstaller = "$PublicDesktop\TeraBox_Setup.exe"
-            curl.exe -L -s "$dlUrl" -H "Referer: https://www.terabox.com/" -A "Mozilla/5.0" -o "$tbInstaller"
-
-            if ((Test-Path $tbInstaller) -and ((Get-Item $tbInstaller).Length -gt 10MB)) {
-              & "C:\Program Files\7-Zip\7z.exe" x "$tbInstaller" -o"C:\TeraBoxApp" -y | Out-Null
-              if (Test-Path "C:\TeraBoxApp\TeraBox.exe") {
-                $Shortcut = $WshShell.CreateShortcut("$PublicDesktop\TeraBox.lnk")
-                $Shortcut.TargetPath = "C:\TeraBoxApp\TeraBox.exe"
-                $Shortcut.Save()
-                Remove-Item $tbInstaller -Force -ErrorAction SilentlyContinue
-              } else {
-                Start-Process -FilePath $tbInstaller -ArgumentList "/S"
-              }
-              Write-Host "TeraBox ready on Public Desktop!"
-            }
-          } catch {
-            Write-Host "TeraBox auto-fetch warning: $_"
+          Write-Host "3. Downloading TeraBox..."
+          $yamlUrl = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/f/Flextech/TeraBox/1.38.0/Flextech.TeraBox.installer.yaml"
+          $yaml = Invoke-RestMethod -Uri $yamlUrl -ErrorAction SilentlyContinue
+          $dlUrl = [regex]::Match($yaml, 'InstallerUrl:\s*(https://[^\s]+)').Groups[1].Value
+          if ([string]::IsNullOrWhiteSpace($dlUrl)) {
+            $dlUrl = "https://data.nephobox.com/issue/terabox/PCDownload/TeraBox_1.38.0.exe"
           }
-
+          $tbInstaller = "$PublicDesktop\TeraBox_Setup.exe"
+          curl.exe -L -s "$dlUrl" -H "Referer: https://www.terabox.com/" -A "Mozilla/5.0" -o "$tbInstaller"
+          if (Test-Path $tbInstaller) {
+            & "C:\Program Files\7-Zip\7z.exe" x "$tbInstaller" -o"C:\TeraBoxApp" -y
+            if (Test-Path "C:\TeraBoxApp\TeraBox.exe") {
+              $Shortcut = $WshShell.CreateShortcut("$PublicDesktop\TeraBox.lnk")
+              $Shortcut.TargetPath = "C:\TeraBoxApp\TeraBox.exe"
+              $Shortcut.Save()
+            }
+          }
           exit 0
 
       - name: Download Backup from Previous Session
@@ -188,7 +179,8 @@ jobs:
         shell: powershell
         run: |
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
-          $ip = (& $ts ip -4 | Select-Object -First 1).Trim()
+          $ipList = & $ts ip -4
+          $ip = "$ipList".Trim()
           Add-Content $env:GITHUB_STEP_SUMMARY "### Windows RDP via Tailscale (B)"
           Add-Content $env:GITHUB_STEP_SUMMARY "Tailscale IP: **$ip**"
           Add-Content $env:GITHUB_STEP_SUMMARY "Hostname: **$env:TS_HOSTNAME**"
@@ -201,7 +193,8 @@ jobs:
         continue-on-error: true
         run: |
           $runtime = [int]"${{ inputs.runtime_minutes }}"
-          if ($runtime -lt 1 -or $runtime -gt 335) { $runtime = 335 }
+          if ($runtime -lt 1) { $runtime = 335 }
+          if ($runtime -gt 335) { $runtime = 335 }
           $end = (Get-Date).AddMinutes($runtime)
           while ((Get-Date) -lt $end) {
             Write-Host "$(Get-Date) - RDP is alive"
@@ -211,35 +204,28 @@ jobs:
       - name: Auto Backup Work before Shutdown
         if: ${{ always() && inputs.enable_backup == 'true' }}
         shell: powershell
+        continue-on-error: true
         run: |
           $ArchivePath = "C:\backup_output.zip"
+          Set-Location "C:\Users"
           
-          $UserFolders = Get-ChildItem -Path "C:\Users" -Directory | Where-Object { $_.Name -like "Bullettemporary*" }
-          $PathsToBackup = @()
-          foreach ($u in $UserFolders) {
-            if (Test-Path "$($u.FullName)\Downloads") { $PathsToBackup += "$($u.FullName)\Downloads" }
-            if (Test-Path "$($u.FullName)\Desktop")   { $PathsToBackup += "$($u.FullName)\Desktop" }
-          }
-
-          if ($PathsToBackup.Count -gt 0) {
-            Write-Host "Backing up folders: $($PathsToBackup -join ', ')"
-            Set-Location "C:\Users"
-            $RelativePaths = $PathsToBackup | ForEach-Object { $_.Replace("C:\Users\", "") }
-            & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 -ssw "$ArchivePath" $RelativePaths
+          & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 -ssw "$ArchivePath" "Bullettemporary*\Desktop" "Bullettemporary*\Downloads"
+          
+          if (Test-Path $ArchivePath) {
+            $FileItem = Get-Item $ArchivePath
+            $SizeMB = [math]::Round($FileItem.Length / 1MB, 2)
+            $ServerResp = Invoke-RestMethod -Uri "https://api.gofile.io/servers"
+            $Server = $ServerResp.data.servers[0].name
+            $RespRaw = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
+            $RespJson = ConvertFrom-Json $RespRaw
+            $GoFileLink = $RespJson.data.downloadPage
             
-            if (Test-Path $ArchivePath) {
-              $SizeMB = [math]::Round((Get-Item $ArchivePath).Length / 1MB, 2)
-              $Server = (Invoke-RestMethod -Uri "https://api.gofile.io/servers").data.servers[0].name
-              $Resp = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
-              $GoFileLink = ($Resp | ConvertFrom-Json).data.downloadPage
-              
-              $Msg = "✅ [Workflow B] Backup Complete ($SizeMB MB)`nGoFile Link: $GoFileLink"
-              Write-Host $Msg
-              Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
-              
-              if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
-                Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body $Msg
-              }
+            $Msg = "✅ [Workflow B] Backup Complete ($SizeMB MB) - GoFile Link: $GoFileLink"
+            Write-Host $Msg
+            Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
+            
+            if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
+              Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body $Msg
             }
           }
 
@@ -263,7 +249,7 @@ jobs:
           if ($loops -le 1) { exit 0 }
           $nextLoops = $loops - 1
           
-          $body = @{
+          $payload = @{
             ref = "main"
             inputs = @{
               test_mode = "${{ inputs.test_mode }}"
@@ -272,7 +258,8 @@ jobs:
               enable_backup = "${{ inputs.enable_backup }}"
               prev_run_id = "${{ github.run_id }}"
             }
-          } | ConvertTo-Json -Depth 5
+          }
+          $body = ConvertTo-Json $payload -Depth 5
 
           Invoke-RestMethod `
             -Method POST `
