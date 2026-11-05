@@ -64,6 +64,8 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:TS_API_KEY)) { throw "Missing TS_API_KEY secret" }
           if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) { throw "Missing TS_AUTHKEY secret" }
           if ([string]::IsNullOrWhiteSpace($env:GH_API_TOKEN)) { throw "Missing GH_API_TOKEN secret" }
+          # v8: anchor the session clock to JOB start (used by Keep RDP alive)
+          (Get-Date).ToString("o") | Out-File -FilePath "C:\job_start.txt" -Encoding ascii
 
       - name: Install Tailscale
         shell: powershell
@@ -445,7 +447,16 @@ jobs:
         run: |
           $runtime = [int]"${{ inputs.runtime_minutes }}"
           if ($runtime -lt 1 -or $runtime -gt 335) { $runtime = 335 }
-          $end = (Get-Date).AddMinutes($runtime)
+          # v8: v7 counted $runtime from THIS step, so installs (~10-35 min)
+          # pushed the total past the 360-min job timeout and GitHub killed
+          # the job before backup/upload/Start-B ever ran -> red run, no A->B.
+          # Now the clock starts at JOB start, leaving ~25 min for the ending steps.
+          $startFile = "C:\job_start.txt"
+          if (Test-Path $startFile) { $jobStart = [datetime](Get-Content $startFile -Raw) } else { $jobStart = Get-Date }
+          $end = $jobStart.AddMinutes($runtime)
+          $hardEnd = $jobStart.AddMinutes(335)
+          if ($end -gt $hardEnd) { $end = $hardEnd }
+          Write-Host "Job started: $jobStart - RDP alive until: $end (hard cap 335 min from job start)"
           while ((Get-Date) -lt $end) {
             Write-Host "$(Get-Date) - RDP is alive"
             Start-Sleep -Seconds 30
@@ -454,6 +465,8 @@ jobs:
       - name: Auto Backup Work before Shutdown
         if: ${{ always() && inputs.enable_backup == 'true' }}
         shell: powershell
+        continue-on-error: true
+        timeout-minutes: 15
         run: |
           $ArchivePath = "C:\backup_output.zip"
           $UserFolders = Get-ChildItem -Path "C:\Users" -Directory | Where-Object { $_.Name -like "Bullettemporary*" }
@@ -475,17 +488,22 @@ jobs:
             Set-Location "C:\Users"
             $RelativePaths = $PathsToBackup | ForEach-Object { $_.Replace("C:\Users\", "") }
             & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 -ssw "$ArchivePath" $RelativePaths
+            $global:LASTEXITCODE = 0  # v8: 7z exit 1 = warnings (locked files); must not fail the step
             if (Test-Path $ArchivePath) {
               $SizeMB = [math]::Round((Get-Item $ArchivePath).Length / 1MB, 2)
               Write-Host "Backup created: $SizeMB MB"
-              $Server = (Invoke-RestMethod -Uri "https://api.gofile.io/servers").data.servers[0].name
-              $Resp = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
-              $GoFileLink = ($Resp | ConvertFrom-Json).data.downloadPage
-              $Msg = "Backup Complete ($SizeMB MB) - GoFile Link: $GoFileLink"
-              Write-Host $Msg
-              Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
-              if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
-                Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body $Msg
+              try {
+                $Server = (Invoke-RestMethod -Uri "https://api.gofile.io/servers").data.servers[0].name
+                $Resp = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
+                $GoFileLink = ($Resp | ConvertFrom-Json).data.downloadPage
+                $Msg = "Backup Complete ($SizeMB MB) - GoFile Link: $GoFileLink"
+                Write-Host $Msg
+                Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
+                if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
+                  Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body $Msg
+                }
+              } catch {
+                Write-Host "WARNING: GoFile/webhook upload failed, artifact transfer still continues: $($_.Exception.Message)"
               }
             }
           } else {
