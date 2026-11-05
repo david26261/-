@@ -99,11 +99,11 @@ jobs:
         continue-on-error: true
         run: |
           $PublicDesktop = "C:\Users\Public\Desktop"
+          $WshShell = New-Object -ComObject WScript.Shell
 
           Write-Host "1. Installing WinRAR..."
           choco install winrar -y --no-progress
           if (Test-Path "C:\Program Files\WinRAR\WinRAR.exe") {
-            $WshShell = New-Object -ComObject WScript.Shell
             $Shortcut = $WshShell.CreateShortcut("$PublicDesktop\WinRAR.lnk")
             $Shortcut.TargetPath = "C:\Program Files\WinRAR\WinRAR.exe"
             $Shortcut.Save()
@@ -113,29 +113,40 @@ jobs:
           $tgZip = "$env:TEMP\tg_portable.zip"
           curl.exe -L -s "https://telegram.org/dl/desktop/win64_portable" -o "$tgZip"
           & "C:\Program Files\7-Zip\7z.exe" x "$tgZip" -o"C:\TelegramApp" -y
-          
           if (Test-Path "C:\TelegramApp\Telegram\Telegram.exe") {
-            $WshShell = New-Object -ComObject WScript.Shell
             $Shortcut = $WshShell.CreateShortcut("$PublicDesktop\Telegram Desktop.lnk")
             $Shortcut.TargetPath = "C:\TelegramApp\Telegram\Telegram.exe"
             $Shortcut.Save()
-            Write-Host "Telegram shortcut created on Public Desktop!"
           }
 
           Write-Host "3. Downloading & Installing TeraBox..."
-          $tbInstaller = "$PublicDesktop\TeraBox_Setup.exe"
-          curl.exe -L -s -A "Mozilla/5.0" "https://data.nephobox.com/issue/terabox/PCDownload/TeraBox_1.29.0.4.exe" -o "$tbInstaller"
-          
-          if ((Test-Path $tbInstaller) -and ((Get-Item $tbInstaller).Length -gt 10MB)) {
-            Start-Process -FilePath $tbInstaller -ArgumentList "/S"
-            Start-Sleep -Seconds 15
-          } else {
-            Remove-Item $tbInstaller -Force -ErrorAction SilentlyContinue
-            choco install terabox -y --no-progress
+          try {
+            $api = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/f/Flextech/TeraBox"
+            $latestVer = ($api | Where-Object { $_.type -eq "dir" } | Select-Object -Last 1).name
+            $yamlUrl = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/f/Flextech/TeraBox/$latestVer/Flextech.TeraBox.installer.yaml"
+            $yaml = Invoke-RestMethod -Uri $yamlUrl
+            $dlUrl = [regex]::Match($yaml, 'InstallerUrl:\s*(https://[^\s]+)').Groups[1].Value
+
+            $tbInstaller = "$PublicDesktop\TeraBox_Setup.exe"
+            curl.exe -L -s "$dlUrl" -H "Referer: https://www.terabox.com/" -A "Mozilla/5.0" -o "$tbInstaller"
+
+            if ((Test-Path $tbInstaller) -and ((Get-Item $tbInstaller).Length -gt 10MB)) {
+              & "C:\Program Files\7-Zip\7z.exe" x "$tbInstaller" -o"C:\TeraBoxApp" -y | Out-Null
+              if (Test-Path "C:\TeraBoxApp\TeraBox.exe") {
+                $Shortcut = $WshShell.CreateShortcut("$PublicDesktop\TeraBox.lnk")
+                $Shortcut.TargetPath = "C:\TeraBoxApp\TeraBox.exe"
+                $Shortcut.Save()
+                Remove-Item $tbInstaller -Force -ErrorAction SilentlyContinue
+              } else {
+                Start-Process -FilePath $tbInstaller -ArgumentList "/S"
+              }
+              Write-Host "TeraBox ready on Public Desktop!"
+            }
+          } catch {
+            Write-Host "TeraBox auto-fetch warning: $_"
           }
 
-          Copy-Item "C:\Users\runneradmin\Desktop\*.lnk" "$PublicDesktop\" -Force -ErrorAction SilentlyContinue
-          Copy-Item "C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\**\*.lnk" "$PublicDesktop\" -Force -ErrorAction SilentlyContinue
+          exit 0
 
       - name: Download Backup from Previous Session
         if: ${{ inputs.enable_backup == 'true' && inputs.prev_run_id != '' }}
