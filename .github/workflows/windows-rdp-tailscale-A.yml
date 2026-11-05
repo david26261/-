@@ -94,6 +94,49 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Restart-Service TermService -Force
 
+      - name: Install Default Apps (WinRAR, Telegram, TeraBox)
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $PublicDesktop = "C:\Users\Public\Desktop"
+
+          Write-Host "1. Installing WinRAR..."
+          choco install winrar -y --no-progress
+          if (Test-Path "C:\Program Files\WinRAR\WinRAR.exe") {
+            $WshShell = New-Object -ComObject WScript.Shell
+            $Shortcut = $WshShell.CreateShortcut("$PublicDesktop\WinRAR.lnk")
+            $Shortcut.TargetPath = "C:\Program Files\WinRAR\WinRAR.exe"
+            $Shortcut.Save()
+          }
+
+          Write-Host "2. Installing Telegram Desktop (Portable to Public Desktop)..."
+          $tgZip = "$env:TEMP\tg_portable.zip"
+          curl.exe -L -s "https://telegram.org/dl/desktop/win64_portable" -o "$tgZip"
+          & "C:\Program Files\7-Zip\7z.exe" x "$tgZip" -o"C:\TelegramApp" -y
+          
+          if (Test-Path "C:\TelegramApp\Telegram\Telegram.exe") {
+            $WshShell = New-Object -ComObject WScript.Shell
+            $Shortcut = $WshShell.CreateShortcut("$PublicDesktop\Telegram Desktop.lnk")
+            $Shortcut.TargetPath = "C:\TelegramApp\Telegram\Telegram.exe"
+            $Shortcut.Save()
+            Write-Host "Telegram shortcut created on Public Desktop!"
+          }
+
+          Write-Host "3. Downloading & Installing TeraBox..."
+          $tbInstaller = "$PublicDesktop\TeraBox_Setup.exe"
+          curl.exe -L -s -A "Mozilla/5.0" "https://data.nephobox.com/issue/terabox/PCDownload/TeraBox_1.29.0.4.exe" -o "$tbInstaller"
+          
+          if ((Test-Path $tbInstaller) -and ((Get-Item $tbInstaller).Length -gt 10MB)) {
+            Start-Process -FilePath $tbInstaller -ArgumentList "/S"
+            Start-Sleep -Seconds 15
+          } else {
+            Remove-Item $tbInstaller -Force -ErrorAction SilentlyContinue
+            choco install terabox -y --no-progress
+          }
+
+          Copy-Item "C:\Users\runneradmin\Desktop\*.lnk" "$PublicDesktop\" -Force -ErrorAction SilentlyContinue
+          Copy-Item "C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\**\*.lnk" "$PublicDesktop\" -Force -ErrorAction SilentlyContinue
+
       - name: Download Backup from Previous Session
         if: ${{ inputs.enable_backup == 'true' && inputs.prev_run_id != '' }}
         uses: actions/download-artifact@v4
@@ -107,257 +150,11 @@ jobs:
       - name: Extract Restored Files to User Profile
         if: ${{ inputs.enable_backup == 'true' && inputs.prev_run_id != '' }}
         shell: powershell
-        continue-on-error: true
         run: |
-          $zip = "C:\RestoredBackup\backup_output.zip"
-          if (-not (Test-Path $zip)) { Write-Host "No backup zip was downloaded - nothing to restore"; exit 0 }
-          Write-Host "Backup zip size: $((Get-Item $zip).Length) bytes"
-          New-Item -ItemType Directory -Force -Path "C:\RestoredBackup\extracted" | Out-Null
-          & "C:\Program Files\7-Zip\7z.exe" x "$zip" -o"C:\RestoredBackup\extracted" -y
-          Write-Host "=== Files inside the backup ==="
-          Get-ChildItem "C:\RestoredBackup\extracted" -Recurse -File | ForEach-Object { Write-Host "$($_.FullName) - $($_.Length) bytes" }
-          Add-Content $env:GITHUB_STEP_SUMMARY "### Restored files"
-          Get-ChildItem "C:\RestoredBackup\extracted" -Recurse -File | ForEach-Object { Add-Content $env:GITHUB_STEP_SUMMARY "- $($_.FullName.Replace('C:\RestoredBackup\extracted\','')) - $($_.Length) bytes" }
-          # Immediate copy into the expected profile folder
-          $srcProfile = Get-ChildItem "C:\RestoredBackup\extracted" -Directory | Select-Object -First 1
-          if ($srcProfile) {
-            Copy-Item "$($srcProfile.FullName)" "C:\Users\" -Recurse -Force -ErrorAction SilentlyContinue
+          if (Test-Path "C:\RestoredBackup\backup_output.zip") {
+            & "C:\Program Files\7-Zip\7z.exe" x "C:\RestoredBackup\backup_output.zip" -o"C:\Users" -y
+            Write-Host "Files restored successfully to C:\Users!"
           }
-          # Guarantee: a logon task copies the files into the REAL profile of the RDP user
-          # (Windows may create the profile as Bullettemporary.<name> on first logon)
-          $restoreScript = @'
-          $src = Get-ChildItem "C:\RestoredBackup\extracted" -Directory | Select-Object -First 1
-          if ($src) {
-            foreach ($f in @("Desktop", "Downloads", "Documents")) {
-              if (Test-Path "$($src.FullName)\$f") {
-                New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\$f" | Out-Null
-                Copy-Item "$($src.FullName)\$f\*" "$env:USERPROFILE\$f\" -Recurse -Force -ErrorAction SilentlyContinue
-              }
-            }
-          }
-          '@
-          Set-Content "C:\RestoredBackup\apply-restore.ps1" $restoreScript
-          try {
-            $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File C:\RestoredBackup\apply-restore.ps1"
-            $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:RDP_USER
-            $principal = New-ScheduledTaskPrincipal -UserId $env:RDP_USER -RunLevel Highest
-            Register-ScheduledTask -TaskName "ApplyRestoredFiles" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-            Write-Host "Logon restore task registered for $env:RDP_USER"
-          } catch { Write-Host "WARNING: could not register logon restore task: $_" }
-
-      - name: Install WinRAR
-        shell: powershell
-        continue-on-error: true
-        timeout-minutes: 5
-        run: |
-          function New-DeskShortcut($exe, $name) {
-            foreach ($desk in @("C:\Users\Public\Desktop", "C:\Users\$env:RDP_USER\Desktop")) {
-              if (Test-Path $desk) {
-                $s = New-Object -ComObject WScript.Shell
-                $lnk = $s.CreateShortcut("$desk\$name.lnk")
-                $lnk.TargetPath = $exe
-                $lnk.Save()
-                Write-Host "Shortcut created: $desk\$name.lnk"
-              }
-            }
-          }
-          Write-Host "Installing WinRAR (direct download, silent)..."
-          $wr = "$env:TEMP\winrar-setup.exe"
-          curl.exe -L -f -s --connect-timeout 20 --max-time 120 --retry 2 "https://www.win-rar.com/fileadmin/winrar-versions/winrar-x64-723.exe" -o "$wr"
-          if ((Test-Path $wr) -and ((Get-Item $wr).Length -gt 2MB)) {
-            Start-Process -FilePath $wr -ArgumentList "/S" -Wait
-          }
-          if (-not (Test-Path "C:\Program Files\WinRAR\WinRAR.exe")) {
-            Write-Host "Direct install did not produce WinRAR.exe - trying winget..."
-            winget install --id RARLab.WinRAR -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-          }
-          if (Test-Path "C:\Program Files\WinRAR\WinRAR.exe") {
-            New-DeskShortcut "C:\Program Files\WinRAR\WinRAR.exe" "WinRAR"
-            Write-Host "WinRAR OK"
-          } else {
-            Write-Host "WARNING: WinRAR.exe still not found"
-          }
-
-      - name: Install Telegram Desktop
-        shell: powershell
-        continue-on-error: true
-        timeout-minutes: 6
-        run: |
-          function New-DeskShortcut($exe, $name) {
-            foreach ($desk in @("C:\Users\Public\Desktop", "C:\Users\$env:RDP_USER\Desktop")) {
-              if (Test-Path $desk) {
-                $s = New-Object -ComObject WScript.Shell
-                $lnk = $s.CreateShortcut("$desk\$name.lnk")
-                $lnk.TargetPath = $exe
-                $lnk.Save()
-                Write-Host "Shortcut created: $desk\$name.lnk"
-              }
-            }
-          }
-          $tgZip = "$env:TEMP\telegram-portable.zip"
-          # GitHub FIRST: telegram.org took 3m9s in the v5 run; GitHub's CDN is far faster.
-          Write-Host "Downloading Telegram portable from Telegram official GitHub release..."
-          try {
-            $rel = Invoke-RestMethod "https://api.github.com/repos/telegramdesktop/tdesktop/releases/latest" -Headers @{ "User-Agent" = "Mozilla/5.0" }
-            $asset = $rel.assets | Where-Object { $_.name -like "tportable-x64*.zip" } | Select-Object -First 1
-            if ($asset) {
-              Write-Host "Downloading $($asset.name) from GitHub..."
-              curl.exe -L -f -s --connect-timeout 20 --max-time 90 --retry 2 $asset.browser_download_url -o "$tgZip"
-            }
-          } catch { Write-Host "GitHub lookup failed" }
-          if (-not ((Test-Path $tgZip) -and ((Get-Item $tgZip).Length -gt 20MB))) {
-            Write-Host "GitHub slow or failed - falling back to telegram.org..."
-            curl.exe -L -f -s --connect-timeout 20 --max-time 60 --retry 1 "https://telegram.org/dl/desktop/win64_portable" -o "$tgZip"
-          }
-          if ((Test-Path $tgZip) -and ((Get-Item $tgZip).Length -gt 20MB)) {
-            New-Item -ItemType Directory -Force -Path "C:\Apps" | Out-Null
-            & "C:\Program Files\7-Zip\7z.exe" x "$tgZip" -o"C:\Apps" -y
-          } else {
-            Write-Host "WARNING: Telegram download failed on both sources"
-          }
-          if (Test-Path "C:\Apps\Telegram\Telegram.exe") {
-            New-DeskShortcut "C:\Apps\Telegram\Telegram.exe" "Telegram Desktop"
-            Write-Host "Telegram OK (portable at C:\Apps\Telegram)"
-          } else {
-            Write-Host "WARNING: Telegram.exe not found after extraction"
-          }
-
-      - name: Install TeraBox Desktop
-        shell: powershell
-        continue-on-error: true
-        timeout-minutes: 12
-        run: |
-          function New-DeskShortcut($exe, $name) {
-            foreach ($desk in @("C:\Users\Public\Desktop", "C:\Users\$env:RDP_USER\Desktop")) {
-              if (Test-Path $desk) {
-                $s = New-Object -ComObject WScript.Shell
-                $lnk = $s.CreateShortcut("$desk\$name.lnk")
-                $lnk.TargetPath = $exe
-                $lnk.Save()
-                Write-Host "Shortcut created: $desk\$name.lnk"
-              }
-            }
-          }
-          function Find-TeraBox {
-            $cands = @(
-              "C:\Program Files\TeraBox\TeraBox.exe",
-              "C:\Program Files (x86)\TeraBox\TeraBox.exe",
-              "$env:APPDATA\TeraBox\TeraBox.exe",
-              "C:\Users\runneradmin\AppData\Roaming\TeraBox\TeraBox.exe",
-              "$env:LOCALAPPDATA\TeraBox\TeraBox.exe",
-              "C:\Users\runneradmin\AppData\Local\TeraBox\TeraBox.exe",
-              "C:\Users\runneradmin\AppData\Local\Programs\TeraBox\TeraBox.exe"
-            )
-            $hit = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
-            if ($hit) { return $hit }
-            return (Get-ChildItem "C:\Users\runneradmin\AppData", "C:\Program Files", "C:\Program Files (x86)" -Recurse -Filter "TeraBox.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
-          }
-          $tbExe = $null
-
-          # ---------- Method 1: official direct installer (no winget at all) ----------
-          Write-Host "Method 1: TeraBox official direct installer..."
-          $tbUrl = $null
-          try {
-            $page = curl.exe -L -f -s --connect-timeout 20 --max-time 60 "https://www.terabox.com/terabox-cloud-storage-for-pc-free-download"
-            $m = [regex]::Match(($page -join "`n"), "https://data\.nephobox\.com/[^\s""']+?\.exe")
-            if ($m.Success) { $tbUrl = $m.Value; Write-Host "Live installer URL from terabox.com: $tbUrl" }
-          } catch { Write-Host "Could not read terabox.com download page" }
-          if (-not $tbUrl) {
-            $tbUrl = "https://data.nephobox.com/issue/terabox/PCTeraBox/Terabox_1.49.5.183.exe"
-            Write-Host "Using pinned installer URL: $tbUrl"
-          }
-          $tbSetup = "$env:TEMP\TeraBoxSetup.exe"
-          curl.exe -L -f -s --connect-timeout 20 --max-time 300 --retry 2 "$tbUrl" -o "$tbSetup"
-          if ((Test-Path $tbSetup) -and ((Get-Item $tbSetup).Length -gt 30MB)) {
-            Write-Host ("Installer downloaded: " + [math]::Round((Get-Item $tbSetup).Length / 1MB, 1) + " MB - installing silently (/S)...")
-            $p = Start-Process "$tbSetup" -ArgumentList "/S" -PassThru
-            # WAIT until the installer process has FULLY exited. v5 killed it the
-            # moment TeraBox.exe appeared, so its resource files were never written
-            # and the app later failed with "application resource file is missing".
-            for ($i = 0; $i -lt 60; $i++) {
-              Start-Sleep -Seconds 5
-              if ($p.HasExited) { break }
-            }
-            if (-not $p.HasExited) { Write-Host "Installer still running after 300s - stopping it"; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-            Start-Sleep -Seconds 10
-            $tbExe = Find-TeraBox
-            # Manual fallback: keep the installer at a fixed path + a desktop
-            # shortcut, so it can be re-run by hand inside the RDP session.
-            New-Item -ItemType Directory -Force -Path "C:\Apps" | Out-Null
-            Copy-Item "$tbSetup" "C:\Apps\TeraBoxSetup.exe" -Force -ErrorAction SilentlyContinue
-            New-DeskShortcut "C:\Apps\TeraBoxSetup.exe" "TeraBox Setup"
-          } else {
-            Write-Host "WARNING: TeraBox installer download failed or too small"
-          }
-
-          # ---------- Method 2: winget WITH its license file ----------
-          # v4 installed winget with Add-AppxPackage only, so it refused to run:
-          # "No applicable app licenses found". The license XML from the same
-          # GitHub release must be injected with Add-AppxProvisionedPackage.
-          if (-not $tbExe) {
-            Write-Host "Method 2: winget with license provisioning..."
-            curl.exe -L -f -s --connect-timeout 20 --max-time 180 --retry 2 "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx" -o "$env:TEMP\vclibs.appx"
-            Add-AppxPackage "$env:TEMP\vclibs.appx" -ErrorAction SilentlyContinue
-            curl.exe -L -f -s --connect-timeout 20 --max-time 180 --retry 2 "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.x64.appx" -o "$env:TEMP\uixaml.appx"
-            Add-AppxPackage "$env:TEMP\uixaml.appx" -ErrorAction SilentlyContinue
-            try {
-              $rel = Invoke-RestMethod "https://api.github.com/repos/microsoft/winget-cli/releases/tags/v1.8.1911" -Headers @{ "User-Agent" = "Mozilla/5.0" }
-              $bundleAsset = $rel.assets | Where-Object { $_.name -like "*.msixbundle" } | Select-Object -First 1
-              $licAsset = $rel.assets | Where-Object { $_.name -like "*License1.xml" } | Select-Object -First 1
-              if ($bundleAsset) { curl.exe -L -f -s --connect-timeout 20 --max-time 180 --retry 1 $bundleAsset.browser_download_url -o "$env:TEMP\winget.msixbundle" }
-              if ($licAsset) { curl.exe -L -f -s --connect-timeout 20 --max-time 60 --retry 1 $licAsset.browser_download_url -o "$env:TEMP\winget-license.xml"; Write-Host ("License file: " + $licAsset.name) }
-            } catch { Write-Host "winget release lookup failed" }
-            if (Test-Path "$env:TEMP\winget.msixbundle") {
-              Add-AppxPackage "$env:TEMP\winget.msixbundle" -ErrorAction SilentlyContinue
-              if (Test-Path "$env:TEMP\winget-license.xml") {
-                try {
-                  Add-AppxProvisionedPackage -Online -PackagePath "$env:TEMP\winget.msixbundle" -LicensePath "$env:TEMP\winget-license.xml" -ErrorAction Stop | Out-Null
-                  Write-Host "winget provisioned WITH license"
-                } catch { Write-Host "Provisioning failed" }
-              }
-            }
-            $wg = Get-ChildItem "C:\Program Files\WindowsApps" -Recurse -Filter winget.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-            if ($wg) {
-              $ver = & $wg --version 2>$null
-              Write-Host "winget smoke test: $ver"
-              if ($ver) {
-                & $wg install --id Flextech.TeraBox -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-                $tbExe = Find-TeraBox
-              } else {
-                Write-Host "WARNING: winget still refuses to run (license)"
-              }
-            } else {
-              Write-Host "WARNING: winget.exe not found after install"
-            }
-          }
-
-          # ---------- Finish: one machine-wide location + shortcuts ----------
-          if ($tbExe) {
-            if ($tbExe -like "*AppData*") {
-              $srcDir = Split-Path $tbExe
-              Write-Host "TeraBox installed per-user at $tbExe - mirroring program folder to Program Files (robocopy)..."
-              robocopy "$srcDir" "C:\Program Files\TeraBox" /E /R:2 /W:2 /NFL /NDL /NJH /NJS | Out-Null
-              $srcCount = (Get-ChildItem "$srcDir" -Recurse -File -ErrorAction SilentlyContinue).Count
-              $dstCount = (Get-ChildItem "C:\Program Files\TeraBox" -Recurse -File -ErrorAction SilentlyContinue).Count
-              Write-Host "TeraBox folder file count - source: $srcCount | Program Files copy: $dstCount"
-              if (Test-Path "C:\Program Files\TeraBox\TeraBox.exe") { $tbExe = "C:\Program Files\TeraBox\TeraBox.exe" }
-            }
-            New-DeskShortcut $tbExe "TeraBox"
-            Write-Host "TeraBox OK - $tbExe"
-          } else {
-            Write-Host "WARNING: TeraBox.exe not found after BOTH methods"
-          }
-
-      - name: Verify Desktop shortcuts
-        shell: powershell
-        continue-on-error: true
-        run: |
-          Write-Host "=== Public Desktop contents ==="
-          Get-ChildItem "C:\Users\Public\Desktop" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
-          Write-Host "=== Installed check ==="
-          Write-Host ("WinRAR:   " + (Test-Path "C:\Program Files\WinRAR\WinRAR.exe"))
-          Write-Host ("Telegram: " + (Test-Path "C:\Apps\Telegram\Telegram.exe"))
-          Write-Host ("TeraBox:  " + ((Test-Path "C:\Program Files\TeraBox\TeraBox.exe") -or (Test-Path "C:\Users\Public\Desktop\TeraBox.lnk")))
 
       - name: Connect Tailscale
         shell: powershell
@@ -405,40 +202,34 @@ jobs:
         shell: powershell
         run: |
           $ArchivePath = "C:\backup_output.zip"
+          
           $UserFolders = Get-ChildItem -Path "C:\Users" -Directory | Where-Object { $_.Name -like "Bullettemporary*" }
           $PathsToBackup = @()
           foreach ($u in $UserFolders) {
-            foreach ($f in @("Downloads", "Desktop", "Documents")) {
-              if (Test-Path "$($u.FullName)\$f") { $PathsToBackup += "$($u.FullName)\$f" }
-            }
+            if (Test-Path "$($u.FullName)\Downloads") { $PathsToBackup += "$($u.FullName)\Downloads" }
+            if (Test-Path "$($u.FullName)\Desktop")   { $PathsToBackup += "$($u.FullName)\Desktop" }
           }
-          Write-Host "=== Files that will be backed up ==="
-          Add-Content $env:GITHUB_STEP_SUMMARY "### Files backed up"
-          foreach ($p in $PathsToBackup) {
-            Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
-              Write-Host "$($_.FullName) - $($_.Length) bytes"
-              Add-Content $env:GITHUB_STEP_SUMMARY "- $($_.FullName) - $($_.Length) bytes"
-            }
-          }
+
           if ($PathsToBackup.Count -gt 0) {
+            Write-Host "Backing up folders: $($PathsToBackup -join ', ')"
             Set-Location "C:\Users"
             $RelativePaths = $PathsToBackup | ForEach-Object { $_.Replace("C:\Users\", "") }
             & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 -ssw "$ArchivePath" $RelativePaths
+            
             if (Test-Path $ArchivePath) {
               $SizeMB = [math]::Round((Get-Item $ArchivePath).Length / 1MB, 2)
-              Write-Host "Backup created: $SizeMB MB"
               $Server = (Invoke-RestMethod -Uri "https://api.gofile.io/servers").data.servers[0].name
               $Resp = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
               $GoFileLink = ($Resp | ConvertFrom-Json).data.downloadPage
-              $Msg = "Backup Complete ($SizeMB MB) - GoFile Link: $GoFileLink"
+              
+              $Msg = "✅ [Workflow A] Backup Complete ($SizeMB MB)`nGoFile Link: $GoFileLink"
               Write-Host $Msg
               Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
+              
               if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
                 Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body $Msg
               }
             }
-          } else {
-            Write-Host "WARNING: no user folders found to back up"
           }
 
       - name: Upload Artifact for Next Session Transfer
