@@ -181,7 +181,7 @@ jobs:
       - name: Install Telegram Desktop
         shell: powershell
         continue-on-error: true
-        timeout-minutes: 5
+        timeout-minutes: 6
         run: |
           function New-DeskShortcut($exe, $name) {
             foreach ($desk in @("C:\Users\Public\Desktop", "C:\Users\$env:RDP_USER\Desktop")) {
@@ -194,20 +194,20 @@ jobs:
               }
             }
           }
-          Write-Host "Downloading Telegram portable (official zip - no installer)..."
           $tgZip = "$env:TEMP\telegram-portable.zip"
-          # Hard time caps: a stalled download can never hang this step again
-          curl.exe -L -f -s --connect-timeout 20 --max-time 90 --retry 2 "https://telegram.org/dl/desktop/win64_portable" -o "$tgZip"
+          # GitHub FIRST: telegram.org took 3m9s in the v5 run; GitHub's CDN is far faster.
+          Write-Host "Downloading Telegram portable from Telegram official GitHub release..."
+          try {
+            $rel = Invoke-RestMethod "https://api.github.com/repos/telegramdesktop/tdesktop/releases/latest" -Headers @{ "User-Agent" = "Mozilla/5.0" }
+            $asset = $rel.assets | Where-Object { $_.name -like "tportable-x64*.zip" } | Select-Object -First 1
+            if ($asset) {
+              Write-Host "Downloading $($asset.name) from GitHub..."
+              curl.exe -L -f -s --connect-timeout 20 --max-time 90 --retry 2 $asset.browser_download_url -o "$tgZip"
+            }
+          } catch { Write-Host "GitHub lookup failed" }
           if (-not ((Test-Path $tgZip) -and ((Get-Item $tgZip).Length -gt 20MB))) {
-            Write-Host "telegram.org slow or failed - falling back to Telegram official GitHub release..."
-            try {
-              $rel = Invoke-RestMethod "https://api.github.com/repos/telegramdesktop/tdesktop/releases/latest" -Headers @{ "User-Agent" = "Mozilla/5.0" }
-              $asset = $rel.assets | Where-Object { $_.name -like "tportable-x64*.zip" } | Select-Object -First 1
-              if ($asset) {
-                Write-Host "Downloading $($asset.name) from GitHub..."
-                curl.exe -L -f -s --connect-timeout 20 --max-time 180 --retry 2 $asset.browser_download_url -o "$tgZip"
-              }
-            } catch { Write-Host "GitHub fallback failed: $_" }
+            Write-Host "GitHub slow or failed - falling back to telegram.org..."
+            curl.exe -L -f -s --connect-timeout 20 --max-time 60 --retry 1 "https://telegram.org/dl/desktop/win64_portable" -o "$tgZip"
           }
           if ((Test-Path $tgZip) -and ((Get-Item $tgZip).Length -gt 20MB)) {
             New-Item -ItemType Directory -Force -Path "C:\Apps" | Out-Null
@@ -225,7 +225,7 @@ jobs:
       - name: Install TeraBox Desktop
         shell: powershell
         continue-on-error: true
-        timeout-minutes: 10
+        timeout-minutes: 12
         run: |
           function New-DeskShortcut($exe, $name) {
             foreach ($desk in @("C:\Users\Public\Desktop", "C:\Users\$env:RDP_USER\Desktop")) {
@@ -271,17 +271,21 @@ jobs:
           if ((Test-Path $tbSetup) -and ((Get-Item $tbSetup).Length -gt 30MB)) {
             Write-Host ("Installer downloaded: " + [math]::Round((Get-Item $tbSetup).Length / 1MB, 1) + " MB - installing silently (/S)...")
             $p = Start-Process "$tbSetup" -ArgumentList "/S" -PassThru
-            for ($i = 0; $i -lt 24; $i++) {
+            # WAIT until the installer process has FULLY exited. v5 killed it the
+            # moment TeraBox.exe appeared, so its resource files were never written
+            # and the app later failed with "application resource file is missing".
+            for ($i = 0; $i -lt 60; $i++) {
               Start-Sleep -Seconds 5
-              $tbExe = Find-TeraBox
-              if ($tbExe) { break }
               if ($p.HasExited) { break }
             }
-            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-            if (-not $tbExe) {
-              # installer may have spawned a detached child - give it a few more seconds
-              for ($i = 0; $i -lt 6; $i++) { Start-Sleep -Seconds 5; $tbExe = Find-TeraBox; if ($tbExe) { break } }
-            }
+            if (-not $p.HasExited) { Write-Host "Installer still running after 300s - stopping it"; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Seconds 10
+            $tbExe = Find-TeraBox
+            # Manual fallback: keep the installer at a fixed path + a desktop
+            # shortcut, so it can be re-run by hand inside the RDP session.
+            New-Item -ItemType Directory -Force -Path "C:\Apps" | Out-Null
+            Copy-Item "$tbSetup" "C:\Apps\TeraBoxSetup.exe" -Force -ErrorAction SilentlyContinue
+            New-DeskShortcut "C:\Apps\TeraBoxSetup.exe" "TeraBox Setup"
           } else {
             Write-Host "WARNING: TeraBox installer download failed or too small"
           }
@@ -330,8 +334,12 @@ jobs:
           # ---------- Finish: one machine-wide location + shortcuts ----------
           if ($tbExe) {
             if ($tbExe -like "*AppData*") {
-              Write-Host "TeraBox installed per-user at $tbExe - copying program folder to Program Files"
-              Copy-Item (Split-Path $tbExe) "C:\Program Files\TeraBox" -Recurse -Force -ErrorAction SilentlyContinue
+              $srcDir = Split-Path $tbExe
+              Write-Host "TeraBox installed per-user at $tbExe - mirroring program folder to Program Files (robocopy)..."
+              robocopy "$srcDir" "C:\Program Files\TeraBox" /E /R:2 /W:2 /NFL /NDL /NJH /NJS | Out-Null
+              $srcCount = (Get-ChildItem "$srcDir" -Recurse -File -ErrorAction SilentlyContinue).Count
+              $dstCount = (Get-ChildItem "C:\Program Files\TeraBox" -Recurse -File -ErrorAction SilentlyContinue).Count
+              Write-Host "TeraBox folder file count - source: $srcCount | Program Files copy: $dstCount"
               if (Test-Path "C:\Program Files\TeraBox\TeraBox.exe") { $tbExe = "C:\Program Files\TeraBox\TeraBox.exe" }
             }
             New-DeskShortcut $tbExe "TeraBox"
