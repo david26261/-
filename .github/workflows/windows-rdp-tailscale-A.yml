@@ -43,7 +43,7 @@ permissions:
 env:
   RDP_USER: Bullettemporary
   TS_HOSTNAME: bullet
-  WEBHOOK_URL: "https://webhook.site/077f724d-3069-414b-ada8-c6255c34cbca"
+  WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
 
 jobs:
   rdp:
@@ -109,17 +109,21 @@ jobs:
       - name: Extract Restored Files to User Profile
         if: ${{ inputs.enable_backup == 'true' && inputs.prev_run_id != '' }}
         shell: powershell
+        env:
+          BACKUP_PASS: ${{ secrets.BACKUP_PASS }}
         continue-on-error: true
         run: |
-          $zip = "C:\RestoredBackup\backup_output.zip"
-          if (-not (Test-Path $zip)) { Write-Host "No backup zip was downloaded - nothing to restore"; exit 0 }
-          Write-Host "Backup zip size: $((Get-Item $zip).Length) bytes"
+          $zip = "C:\RestoredBackup\backup_output.7z"
+          if (-not (Test-Path $zip)) { Write-Host "No backup archive was downloaded - nothing to restore"; exit 0 }
+          Write-Host "Backup archive size: $((Get-Item $zip).Length) bytes"
           New-Item -ItemType Directory -Force -Path "C:\RestoredBackup\extracted" | Out-Null
-          & "C:\Program Files\7-Zip\7z.exe" x "$zip" -o"C:\RestoredBackup\extracted" -y
-          Write-Host "=== Files inside the backup ==="
-          Get-ChildItem "C:\RestoredBackup\extracted" -Recurse -File | ForEach-Object { Write-Host "$($_.FullName) - $($_.Length) bytes" }
+          if ([string]::IsNullOrWhiteSpace($env:BACKUP_PASS)) { Write-Host "ERROR: BACKUP_PASS secret is not set - cannot decrypt the backup"; exit 0 }
+          & "C:\Program Files\7-Zip\7z.exe" x "$zip" -o"C:\RestoredBackup\extracted" -y -p"$env:BACKUP_PASS"
+          if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: backup extraction failed - wrong BACKUP_PASS?"; exit 0 }
+          $restoredCount = (Get-ChildItem "C:\RestoredBackup\extracted" -Recurse -File | Measure-Object).Count
+          Write-Host "Restored $restoredCount files from the encrypted backup"
           Add-Content $env:GITHUB_STEP_SUMMARY "### Restored files"
-          Get-ChildItem "C:\RestoredBackup\extracted" -Recurse -File | ForEach-Object { Add-Content $env:GITHUB_STEP_SUMMARY "- $($_.FullName.Replace('C:\RestoredBackup\extracted\','')) - $($_.Length) bytes" }
+          Add-Content $env:GITHUB_STEP_SUMMARY "$restoredCount files restored (names hidden in v9)"
           # Immediate copy into the expected profile folder
           $srcProfile = Get-ChildItem "C:\RestoredBackup\extracted" -Directory | Select-Object -First 1
           if ($srcProfile) {
@@ -420,8 +424,8 @@ jobs:
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
           & $ts up --authkey="$env:TS_AUTHKEY" --hostname="$env:TS_HOSTNAME" --accept-routes --accept-dns=false
           Start-Sleep -Seconds 8
-          & $ts status
-          & $ts ip -4
+          $tsStatus = & $ts status
+          if ($tsStatus) { Write-Host "Tailscale is connected (IP and peer details hidden in v9)" } else { Write-Host "WARNING: tailscale status returned nothing" }
 
       - name: Test RDP availability
         shell: powershell
@@ -434,8 +438,11 @@ jobs:
         run: |
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
           $ip = (& $ts ip -4 | Select-Object -First 1).Trim()
+          if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
+            try { Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body "RDP Ready (A) - Tailscale IP: $ip - User: $env:RDP_USER - Host: $env:TS_HOSTNAME" | Out-Null } catch { Write-Host "WARNING: webhook notify failed" }
+          }
           Add-Content $env:GITHUB_STEP_SUMMARY "### Windows RDP via Tailscale (A)"
-          Add-Content $env:GITHUB_STEP_SUMMARY "Tailscale IP: **$ip**"
+          Add-Content $env:GITHUB_STEP_SUMMARY "Tailscale IP: (sent privately via webhook - hidden in v9)"
           Add-Content $env:GITHUB_STEP_SUMMARY "Hostname: **$env:TS_HOSTNAME**"
           Add-Content $env:GITHUB_STEP_SUMMARY "RDP User: **$env:RDP_USER**"
           Add-Content $env:GITHUB_STEP_SUMMARY "Loops remaining: **${{ inputs.loops }}**"
@@ -465,10 +472,13 @@ jobs:
       - name: Auto Backup Work before Shutdown
         if: ${{ always() && inputs.enable_backup == 'true' }}
         shell: powershell
+        env:
+          BACKUP_PASS: ${{ secrets.BACKUP_PASS }}
         continue-on-error: true
         timeout-minutes: 15
         run: |
-          $ArchivePath = "C:\backup_output.zip"
+          if ([string]::IsNullOrWhiteSpace($env:BACKUP_PASS)) { Write-Host "ERROR: BACKUP_PASS secret is not set - backup SKIPPED (v9 never uploads unencrypted)"; Add-Content $env:GITHUB_STEP_SUMMARY "Backup SKIPPED: BACKUP_PASS secret is missing"; exit 0 }
+          $ArchivePath = "C:\backup_output.7z"
           $UserFolders = Get-ChildItem -Path "C:\Users" -Directory | Where-Object { $_.Name -like "Bullettemporary*" }
           $PathsToBackup = @()
           foreach ($u in $UserFolders) {
@@ -476,34 +486,24 @@ jobs:
               if (Test-Path "$($u.FullName)\$f") { $PathsToBackup += "$($u.FullName)\$f" }
             }
           }
-          Write-Host "=== Files that will be backed up ==="
-          Add-Content $env:GITHUB_STEP_SUMMARY "### Files backed up"
+          $backupFileCount = 0
           foreach ($p in $PathsToBackup) {
-            Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
-              Write-Host "$($_.FullName) - $($_.Length) bytes"
-              Add-Content $env:GITHUB_STEP_SUMMARY "- $($_.FullName) - $($_.Length) bytes"
-            }
+            $backupFileCount += (Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
           }
+          Write-Host "Files that will be backed up: $backupFileCount"
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Files backed up"
+          Add-Content $env:GITHUB_STEP_SUMMARY "$backupFileCount files (names hidden in v9)"
           if ($PathsToBackup.Count -gt 0) {
             Set-Location "C:\Users"
             $RelativePaths = $PathsToBackup | ForEach-Object { $_.Replace("C:\Users\", "") }
-            & "C:\Program Files\7-Zip\7z.exe" a -tzip -mx1 -ssw "$ArchivePath" $RelativePaths
+            & "C:\Program Files\7-Zip\7z.exe" a -t7z -mx1 -ssw -mhe=on -p"$env:BACKUP_PASS" "$ArchivePath" $RelativePaths
             $global:LASTEXITCODE = 0  # v8: 7z exit 1 = warnings (locked files); must not fail the step
             if (Test-Path $ArchivePath) {
               $SizeMB = [math]::Round((Get-Item $ArchivePath).Length / 1MB, 2)
-              Write-Host "Backup created: $SizeMB MB"
-              try {
-                $Server = (Invoke-RestMethod -Uri "https://api.gofile.io/servers").data.servers[0].name
-                $Resp = curl.exe -s -F "file=@$ArchivePath" "https://$Server.gofile.io/contents/uploadfile"
-                $GoFileLink = ($Resp | ConvertFrom-Json).data.downloadPage
-                $Msg = "Backup Complete ($SizeMB MB) - GoFile Link: $GoFileLink"
-                Write-Host $Msg
-                Add-Content $env:GITHUB_STEP_SUMMARY "**GoFile Link:** $GoFileLink ($SizeMB MB)"
-                if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
-                  Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body $Msg
-                }
-              } catch {
-                Write-Host "WARNING: GoFile/webhook upload failed, artifact transfer still continues: $($_.Exception.Message)"
+              Write-Host "Backup created (encrypted): $SizeMB MB"
+              Add-Content $env:GITHUB_STEP_SUMMARY "Encrypted backup ready: $SizeMB MB (transferred as artifact)"
+              if (-not [string]::IsNullOrWhiteSpace($env:WEBHOOK_URL)) {
+                try { Invoke-RestMethod -Uri $env:WEBHOOK_URL -Method Post -Body "Backup Complete (A) - $SizeMB MB - encrypted, transferred as artifact" | Out-Null } catch { Write-Host "WARNING: webhook notify failed" }
               }
             }
           } else {
@@ -516,7 +516,7 @@ jobs:
         continue-on-error: true
         with:
           name: session-backup
-          path: C:\backup_output.zip
+          path: C:\backup_output.7z
           retention-days: 1
 
       - name: Start workflow B
