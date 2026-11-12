@@ -11,7 +11,7 @@ on:
       runtime_minutes:
         description: "Runtime in minutes"
         required: false
-        default: "300"
+        default: "355"
 
       loops:
         description: "Number of A+B cycles"
@@ -453,7 +453,7 @@ jobs:
         continue-on-error: true
         run: |
           $runtime = [int]"${{ inputs.runtime_minutes }}"
-          if ($runtime -lt 1 -or $runtime -gt 300) { $runtime = 300 }
+          if ($runtime -lt 1 -or $runtime -gt 355) { $runtime = 355 }
           # v8: v7 counted $runtime from THIS step, so installs (~10-35 min)
           # pushed the total past the 360-min job timeout and GitHub killed
           # the job before backup/upload/Start-B ever ran -> red run, no A->B.
@@ -461,9 +461,9 @@ jobs:
           $startFile = "C:\job_start.txt"
           if (Test-Path $startFile) { $jobStart = [datetime](Get-Content $startFile -Raw) } else { $jobStart = Get-Date }
           $end = $jobStart.AddMinutes($runtime)
-          $hardEnd = $jobStart.AddMinutes(300)
+          $hardEnd = $jobStart.AddMinutes(355)
           if ($end -gt $hardEnd) { $end = $hardEnd }
-          Write-Host "Job started: $jobStart - RDP alive until: $end (hard cap 300 min from job start)"
+          Write-Host "Job started: $jobStart - RDP alive until: $end (hard cap 355 min from job start)"
           while ((Get-Date) -lt $end) {
             Write-Host "$(Get-Date) - RDP is alive"
             Start-Sleep -Seconds 30
